@@ -74,22 +74,22 @@ class SequenceViewer(QTextEdit):
         font.setPointSize(11)
         self.setFont(font)
 
+    def set_sequence(self, sequence, seq_type):
+        self.clear()
+        colors = DNA_COLORS if seq_type == "DNA" else PROTEIN_COLORS
+        cursor = self.textCursor()
+        chunk_size = 10000
 
+        for offset in range(0, len(sequence), chunk_size):
+            chunk = sequence[offset:offset + chunk_size]
+            for char in chunk:
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor(colors.get(char, "#424242")))
+                cursor.insertText(char, fmt)
+            if offset + chunk_size < len(sequence):
+                cursor.insertText("\n")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        self.moveCursor(self.textCursor().MoveOperation.Start)
 # Main GUI Window
 class MainWindow(QMainWindow):
     def __int__(self):
