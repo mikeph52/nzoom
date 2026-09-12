@@ -1,6 +1,5 @@
 # N-Zoom by mikeph52, Init 12/9/2026
 import sys
-import subprocess
 from pathlib import Path
 from collections import Counter
 
@@ -27,7 +26,7 @@ from PySide6.QtWidgets import (
 
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
 PROTEIN_CHARS = set("ABCDEFGHIKLMNPQRSTVWXYZJUO*-")
-VERSION = set("0.4.1") # for build version
+VERSION = "0.4.1" # for build version
 
 DNA_COLORS = {
     "A": "#2e7d32",
@@ -61,11 +60,11 @@ def detect_seq_type(seq):
     if chars <= PROTEIN_CHARS:
         return "Protein"
     else:
-        return "Uknown"
+        return "Unknown"
 
 # Sequence Viewer function
 class SequenceViewer(QTextEdit):
-    def __int__(self):
+    def __init__(self):
         super().__init__()
         self.setReadOnly(True) # Maybe change letter for editing mode.
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -92,7 +91,7 @@ class SequenceViewer(QTextEdit):
         self.moveCursor(self.textCursor().MoveOperation.Start)
 # Main GUI Window
 class MainWindow(QMainWindow):
-    def __int__(self):
+    def __init__(self):
         super().__init__()
 
         # window elements
@@ -169,7 +168,7 @@ class MainWindow(QMainWindow):
         actions_layout = QVBoxLayout(actions_box)
 
         copy_button = QPushButton("Copy sequence")
-        copy_button.clicked.connect(self.copy_sequence)
+        copy_button.clicked.connect(self.copy_seq)
         actions_layout.addWidget(copy_button)
 
         reverse_button = QPushButton("Reverse complement")
@@ -219,36 +218,94 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded {len(records)} sequence(s)")
         self.sequence_list.setCurrentRow(0)
 
+    def select_record(self, index: int):
+        if index < 0 or index >= len(self.records):
+            return
 
+        record = self.records[index]
+        self.current_record = record
 
+        sequence = normalize_seq(str(record.seq))
+        seq_type = detect_seq_type(sequence)
 
+        self.sequence_title.setText(record.description or record.id)
+        self.viewer.set_sequence(sequence, seq_type)
+        self.type_value.setText(seq_type)
+        self.length_value.setText(f"{len(sequence):,}")
 
+        counts = Counter(sequence)
+        total = len(sequence)
 
+        if seq_type == "DNA" and total:
+            gc = ((counts.get("G", 0) + counts.get("C", 0)) / total) * 100
+            self.gc_value.setText(f"{gc:.2f}%")
+        else:
+            self.gc_value.setText("N/A")
 
+        common = counts.most_common(12)
+        composition = ", ".join(f"{base}: {count:,}" for base, count in common)
+        self.composition_value.setText(composition or "-")
 
+    def copy_seq(self):
+        if self.current_record is None:
+            return
 
+        QApplication.clipboard().setText(normalize_seq(str(self.current_record.seq)))
+        self.statusBar().showMessage("Sequence copied to clipboard", 3000)
 
+    def show_reverse_complement(self):
+        if self.current_record is None:
+            return
 
+        sequence = normalize_seq(str(self.current_record.seq))
+        if detect_seq_type(sequence) != "DNA":
+            QMessageBox.information(self,"DNA required","Reverse complement is only available for DNA sequences.")
+            return
 
+        result = str(Seq(sequence).reverse_complement())
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Reverse complement")
+        dialog.setText("Reverse complement copied to clipboard.")
+        QApplication.clipboard().setText(result)
+        dialog.exec()
 
+    def show_translation(self):
+        if self.current_record is None:
+            return
 
+        sequence = normalize_seq(str(self.current_record.seq))
 
+        if detect_seq_type(sequence) != "DNA":
+            QMessageBox.information(
+                self,
+                "DNA required",
+                "Translation is only available for DNA sequences.",
+            )
+            return
+        clean = sequence.replace("-", "").replace("U", "T")
+        usable_length = len(clean) - (len(clean) % 3)
+        if usable_length == 0:
+            QMessageBox.warning(self, "Too short", "The sequence is too short to translate.")
+            return
 
+        protein = str(Seq(clean[:usable_length]).translate())
+        QApplication.clipboard().setText(protein)
 
+        preview = protein[:500]
+        if len(protein) > 500:
+            preview += "\n..."
 
-
-
-
-
-
-
-
-
-
-
+        QMessageBox.information(
+            self,
+            "Translation",
+            f"Protein translation copied to clipboard.\n\n{preview}",
+        )
 
 def main():
-    app = QApplication
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
