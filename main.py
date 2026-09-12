@@ -105,22 +105,39 @@ class MainWindow(QMainWindow):
         self.build_menu()
 
     def build_menu(self):
-        file_menu = self.menuBar().addMenu("&File")
+        # file submenu
+        file_menu = self.menuBar().addMenu("File")
 
-        open_action = QAction("&Open FASTA...", self)
+        open_action = QAction("Open FASTA...", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_fasta)
         file_menu.addAction(open_action)
         file_menu.addSeparator()
 
-        about_action = QAction("About", self)
-        file_menu.addAction(about_action)
-        file_menu.addSeparator()
-
-        exit_action = QAction("E&xit", self)
+        exit_action = QAction("Exit", self)
         exit_action.setShortcut("Ctrl+C")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        # tools submenu
+        tools_menu = self.menuBar().addMenu("Tools")
+
+        ncbi_action = QAction("Fetch data from NCBI", self)
+        tools_menu.addAction(ncbi_action)
+        tools_menu.addSeparator()
+
+        translate_action = QAction("Translate sequence", self)
+        tools_menu.addAction(translate_action)
+        tools_menu.addSeparator()
+
+        rs_action = QAction("Find restriction sites", self)
+        tools_menu.addAction(rs_action)
+
+        # about submenu
+        about_menu = self.menuBar().addMenu("About")
+        about_action = QAction("About", self)
+        about_menu.addAction(about_action)
+        about_menu.addSeparator()
 
     def build_ui(self):
         root = QWidget()
