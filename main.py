@@ -119,7 +119,125 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
     def build_ui(self):
-        root = 
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+        top_bar = QHBoxLayout()
+        open_button = QPushButton("Open FASTA")
+        open_button.clicked.connect(self.open_fasta)
+        top_bar.addWidget(open_button)
+
+        self.file_label = QLabel("No file loaded")
+        self.file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        top_bar.addWidget(self.file_label, 1)
+        root_layout.addLayout(top_bar)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.sequence_list = QListWidget()
+        self.sequence_list.setMinimumWidth(230)
+        self.sequence_list.currentRowChanged.connect(self.select_record)
+        splitter.addWidget(self.sequence_list)
+
+        center = QWidget()
+        center_layout = QVBoxLayout(center)
+
+        self.sequence_title = QLabel("Sequence")
+        title_font = self.sequence_title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(13)
+        self.sequence_title.setFont(title_font)
+        center_layout.addWidget(self.sequence_title)
+        self.viewer = SequenceViewer()
+        center_layout.addWidget(self.viewer, 1)
+        splitter.addWidget(center)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        info_box = QGroupBox("Sequence information")
+        form = QFormLayout(info_box)
+
+        self.type_value = QLabel("-")
+        self.length_value = QLabel("-")
+        self.gc_value = QLabel("-")
+        self.composition_value = QLabel("-")
+        self.composition_value.setWordWrap(True)
+        form.addRow("Type:", self.type_value)
+        form.addRow("Length:", self.length_value)
+        form.addRow("GC %:", self.gc_value)
+        form.addRow("Composition:", self.composition_value)
+
+        right_layout.addWidget(info_box)
+        actions_box = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_box)
+
+        copy_button = QPushButton("Copy sequence")
+        copy_button.clicked.connect(self.copy_sequence)
+        actions_layout.addWidget(copy_button)
+
+        reverse_button = QPushButton("Reverse complement")
+        reverse_button.clicked.connect(self.show_reverse_complement)
+        actions_layout.addWidget(reverse_button)
+
+        translate_button = QPushButton("Translate DNA")
+        translate_button.clicked.connect(self.show_translation)
+        actions_layout.addWidget(translate_button)
+
+        right_layout.addWidget(actions_box)
+        right_layout.addStretch()
+
+        splitter.addWidget(right_panel)
+        splitter.setSizes([240, 700, 260])
+
+        root_layout.addWidget(splitter, 1)
+
+        self.setCentralWidget(root)
+        self.statusBar().showMessage("Ready")
+
+    def open_fasta(self):
+        path, _ = QFileDialog.getOpenFileName(self,"Open FASTA file","","FASTA files (*.fasta *.fa *.faa *.fna *.fas);;All files (*)")
+
+        if not path:
+            return
+        try:
+            records = list(SeqIO.parse(path, "fasta"))
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Could not read FASTA file:\n{exc}")
+            return
+        if not records:
+            QMessageBox.warning(self, "No sequences", "No FASTA records were found.")
+            return
+
+        self.records = records
+        self.current_record = None
+        self.sequence_list.clear()
+
+        for record in records:
+            label = record.id
+            if record.description and record.description != record.id:
+                label += f" — {record.description}"
+            self.sequence_list.addItem(label)
+
+        self.file_label.setText(str(Path(path)))
+        self.statusBar().showMessage(f"Loaded {len(records)} sequence(s)")
+        self.sequence_list.setCurrentRow(0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
