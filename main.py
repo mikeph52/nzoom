@@ -113,7 +113,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_action)
         file_menu.addSeparator()
 
+        about_action = QAction("About", self)
+        file_menu.addAction(about_action)
+        file_menu.addSeparator()
+
         exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+C")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
