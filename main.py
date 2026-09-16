@@ -91,6 +91,60 @@ class SequenceViewer(QTextEdit):
                 cursor.insertText("\n")
 
         self.moveCursor(self.textCursor().MoveOperation.Start)
+
+# CircularDNAViwer is a class for implementing circular DNA viwer in the app. Experimental feature.
+class CircularDNAViewer(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.sequence = ""
+        self.title = "Circular DNA"
+        self.setMinimumSize(400, 400)
+
+    def set_seq(self, sequence, title="Circular DNA"):
+        self.sequence = normalize_seq(sequence)
+        self.title = title
+        self.update()
+
+    def clear_seq(self):
+        self.sequence = ""
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # set background
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        if not self.sequence:
+            painter.setPen(QColor("#777777"))
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "No circular DNA loaded",
+            )
+            return
+
+        width = self.width()
+        height = self.height()
+
+        center_x = width / 2
+        center_y = height / 2
+
+        radius = min(width, height) * 0.32
+        # draw dna
+
+
+
+
+
+
+
+
+
+
+
+
 # Main GUI Window
 class MainWindow(QMainWindow):
     def __init__(self):
