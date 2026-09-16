@@ -1,5 +1,6 @@
 # N-Zoom by mikeph52, Init 12/9/2026
 import sys
+import math
 from pathlib import Path
 from collections import Counter
 
@@ -133,18 +134,97 @@ class CircularDNAViewer(QWidget):
 
         radius = min(width, height) * 0.32
         # draw dna
+        pen = QPen(QColor("#333333"))
+        pen.setWidth(5)
+        painter.setPen(pen)
 
+        painter.drawEllipse(
+            int(center_x - radius),
+            int(center_y - radius),
+            int(radius * 2),
+            int(radius * 2),
+        )
+        # tickmarks
+        sequence_length = len(self.sequence)
 
+        if sequence_length <= 1000:
+            tick_interval = 100
+        elif sequence_length <= 5000:
+            tick_interval = 500
+        elif sequence_length <= 10000:
+            tick_interval = 1000
+        elif sequence_length <= 50000:
+            tick_interval = 5000
+        else:
+            tick_interval = 10000
 
+        for position in range(0, sequence_length, tick_interval):
 
+            fraction = position / sequence_length
+            angle = fraction * 360 - 90
+            angle_rad = math.radians(angle)
+            inner_radius = radius - 8
+            outer_radius = radius + 8
 
+            x1 = center_x + math.cos(angle_rad) * inner_radius
+            y1 = center_y + math.sin(angle_rad) * inner_radius
+            x2 = center_x + math.cos(angle_rad) * outer_radius
+            y2 = center_y + math.sin(angle_rad) * outer_radius
 
+            tick_pen = QPen(QColor("#555555"))
+            tick_pen.setWidth(2)
 
+            painter.setPen(tick_pen)
+            painter.drawLine(
+                int(x1),
+                int(y1),
+                int(x2),
+                int(y2),
+            )
+            #tick labels
+            label_radius = radius + 30
+            label_x = center_x + math.cos(angle_rad) * label_radius
+            label_y = center_y + math.sin(angle_rad) * label_radius
 
+            painter.setPen(QColor("#333333"))
+            painter.drawText(
+                int(label_x - 30),
+                int(label_y - 10),
+                60,
+                20,
+                Qt.AlignmentFlag.AlignCenter,
+                f"{position:,}",
+            )
+            # center title
+            title_font = QFont()
+            title_font.setPointSize(12)
+            title_font.setBold(True)
 
+            painter.setFont(title_font)
+            painter.setPen(QColor("#222222"))
+            painter.drawText(
+                int(center_x - radius),
+                int(center_y - 35),
+                int(radius * 2),
+                30,
+                Qt.AlignmentFlag.AlignCenter,
+                self.title,
+            )
+            # seq length
+            length_font = QFont()
+            length_font.setPointSize(11)
 
+            painter.setFont(length_font)
+            painter.setPen(QColor("#555555"))
 
-
+            painter.drawText(
+                int(center_x - radius),
+                int(center_y + 5),
+                int(radius * 2),
+                30,
+                Qt.AlignmentFlag.AlignCenter,
+                f"{sequence_length:,} bp",
+            )
 # Main GUI Window
 class MainWindow(QMainWindow):
     def __init__(self):
