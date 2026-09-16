@@ -6,7 +6,7 @@ from collections import Counter
 from Bio import SeqIO
 from Bio.Seq import Seq
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont
+from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QGroupBox,
     QFormLayout,
+    QTableWidget,
+    QSizePolicy,
 )
 
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
