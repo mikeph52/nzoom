@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QTableWidget,
     QSizePolicy,
+    QTabWidget,
 )
 
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
@@ -302,8 +303,16 @@ class MainWindow(QMainWindow):
         title_font.setPointSize(13)
         self.sequence_title.setFont(title_font)
         center_layout.addWidget(self.sequence_title)
+        # add tabs
+        self.view_tabs = QTabWidget()
+        # linear dna
         self.viewer = SequenceViewer()
-        center_layout.addWidget(self.viewer, 1)
+        self.view_tabs.addTab(self.viewer, "Sequence")
+        # circular dna
+        self.circular_viewer = CircularDNAViewer()
+        self.view_tabs.addTab(self.circular_viewer, "Circular Map")
+        center_layout.addWidget(self.view_tabs, 1)
+
         splitter.addWidget(center)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
