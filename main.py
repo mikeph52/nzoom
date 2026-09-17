@@ -396,7 +396,18 @@ class MainWindow(QMainWindow):
         seq_type = detect_seq_type(sequence)
 
         self.sequence_title.setText(record.description or record.id)
+        # linear dna viwer
         self.viewer.set_sequence(sequence, seq_type)
+
+        # add circular viewer
+        if seq_type == "DNA":
+            self.circular_viewer.set_seq(sequence, record.id)
+
+            self.view_tabs.setTabEnabled(1, True)
+        else:
+            self.circular_viewer.clear_seq()
+            self.view_tabs.setTabEnabled(1, False)
+
         self.type_value.setText(seq_type)
         self.length_value.setText(f"{len(sequence):,}")
 
