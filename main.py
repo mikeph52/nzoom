@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from core import seqtools as st
 from core.viewers import CircularDNAViewer, SequenceViewer
 
-VERSION = "0.6.4"
+VERSION = "0.7.5"
 
 OPEN_FILTER = (
     "Sequence files (*.gb *.gbk *.genbank *.gbff *.fasta *.fa *.faa *.fna *.fas);;"
