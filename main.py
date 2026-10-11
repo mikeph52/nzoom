@@ -1,277 +1,109 @@
 # N-Zoom by mikeph52, Init 12/9/2026
+# the main file
 import sys
-import math
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
-from Bio import SeqIO
 from Bio.Seq import Seq
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QFont, QPainter, QPen
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
-    QMainWindow,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
-    QListWidget,
-    QTextEdit,
-    QWidget,
-    QVBoxLayout,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
     QLabel,
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
-    QMessageBox,
-    QGroupBox,
-    QFormLayout,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
-DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
-PROTEIN_CHARS = set("ABCDEFGHIKLMNPQRSTVWXYZJUO*-")
-VERSION = "0.5.1"  # for build version
-MAX_COLORED_LENGTH = 50_000  # above this, show plain text (coloring is slow)
+from core import seqtools as st
+from core.viewers import CircularDNAViewer, SequenceViewer
 
-DNA_COLORS = {
-    "A": "#2e7d32",
-    "T": "#c62828",
-    "U": "#c62828",
-    "G": "#f9a825",
-    "C": "#1565c0",
-    "N": "#616161",
-}
+VERSION = "0.6.4"
 
-PROTEIN_COLORS = {
-    "A": "#388e3c", "V": "#388e3c", "L": "#388e3c", "I": "#388e3c", "M": "#388e3c",
-    "F": "#6a1b9a", "W": "#6a1b9a", "Y": "#6a1b9a",
-    "K": "#1565c0", "R": "#1565c0", "H": "#1565c0",
-    "D": "#c62828", "E": "#c62828",
-    "S": "#00838f", "T": "#00838f", "N": "#00838f", "Q": "#00838f",
-    "G": "#5d4037", "P": "#5d4037", "C": "#ef6c00",
-    "*": "#000000",
-}
+OPEN_FILTER = (
+    "Sequence files (*.gb *.gbk *.genbank *.gbff *.fasta *.fa *.faa *.fna *.fas);;"
+    "GenBank files (*.gb *.gbk *.genbank *.gbff);;"
+    "FASTA files (*.fasta *.fa *.faa *.fna *.fas);;"
+    "All files (*)"
+)
+SAVE_FILTER = "GenBank (*.gb);;FASTA (*.fasta)"
 
+def number_item(value):
+    # Table cell that sorts numerically."""
+    item = QTableWidgetItem()
+    item.setData(Qt.ItemDataRole.DisplayRole, value)
+    return item
 
-def normalize_seq(seq):
-    return "".join(seq.split()).upper()  # remove any whitespace and force uppercase
-
-
-# detect if sequence is DNA or protein. !IMPORTANT! RNA returns as DNA.
-def detect_seq_type(seq):
-    seq = normalize_seq(seq)
-    chars = set(seq)
-    if not chars:
-        return "Unknown"
-    if chars <= DNA_CHARS:
-        return "DNA"
-    if chars <= PROTEIN_CHARS:
-        return "Protein"
-    return "Unknown"
-
-
-# Sequence viewer widget
-class SequenceViewer(QTextEdit):
-    def __init__(self):
-        super().__init__()
-
-        self.setReadOnly(True)  # maybe change later for editing mode
-        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-
-        font = QFont("Monospace")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(11)
-        self.setFont(font)
-
-    def set_sequence(self, sequence, seq_type):
-        self.clear()
-        sequence = normalize_seq(sequence)
-
-        if len(sequence) > MAX_COLORED_LENGTH:
-            # big sequences: plain text, fast
-            self.setPlainText(sequence)
-        else:
-            colors = DNA_COLORS if seq_type == "DNA" else PROTEIN_COLORS
-            cursor = self.textCursor()
-            cursor.beginEditBlock()
-
-            # insert runs of identical characters with one format (much faster
-            # than one insertText call per character)
-            i = 0
-            n = len(sequence)
-            while i < n:
-                char = sequence[i]
-                j = i + 1
-                while j < n and sequence[j] == char:
-                    j += 1
-                fmt = QTextCharFormat()
-                fmt.setForeground(QColor(colors.get(char, "#424242")))
-                cursor.insertText(sequence[i:j], fmt)
-                i = j
-
-            cursor.endEditBlock()
-
-        cursor = self.textCursor()
-        cursor.movePosition(cursor.MoveOperation.Start)
-        self.setTextCursor(cursor)
-
-
-# Circular DNA map. Experimental feature.
-class CircularDNAViewer(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.sequence = ""
-        self.title = "Circular DNA"
-        self.setMinimumSize(400, 400)
-
-    def set_seq(self, sequence, title="Circular DNA"):
-        self.sequence = normalize_seq(sequence)
-        self.title = title
-        self.update()
-
-    def clear_seq(self):
-        self.sequence = ""
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#ffffff"))
-
-        if not self.sequence:
-            painter.setPen(QColor("#777777"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No circular DNA loaded")
-            return
-
-        width = self.width()
-        height = self.height()
-        center_x = width / 2
-        center_y = height / 2
-        radius = min(width, height) * 0.32
-
-        # backbone circle
-        pen = QPen(QColor("#333333"))
-        pen.setWidth(5)
-        painter.setPen(pen)
-        painter.drawEllipse(
-            int(center_x - radius),
-            int(center_y - radius),
-            int(radius * 2),
-            int(radius * 2),
-        )
-
-        # tick marks
-        sequence_length = len(self.sequence)
-        if sequence_length <= 1000:
-            tick_interval = 100
-        elif sequence_length <= 5000:
-            tick_interval = 500
-        elif sequence_length <= 10000:
-            tick_interval = 1000
-        elif sequence_length <= 50000:
-            tick_interval = 5000
-        else:
-            tick_interval = 10000
-
-        tick_pen = QPen(QColor("#555555"))
-        tick_pen.setWidth(2)
-        label_font = QFont()
-        label_font.setPointSize(9)
-        painter.setFont(label_font)
-
-        for position in range(0, sequence_length, tick_interval):
-            fraction = position / sequence_length
-            angle_rad = math.radians(fraction * 360 - 90)
-            inner_radius = radius - 8
-            outer_radius = radius + 8
-
-            x1 = center_x + math.cos(angle_rad) * inner_radius
-            y1 = center_y + math.sin(angle_rad) * inner_radius
-            x2 = center_x + math.cos(angle_rad) * outer_radius
-            y2 = center_y + math.sin(angle_rad) * outer_radius
-
-            painter.setPen(tick_pen)
-            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-
-            # tick label
-            label_radius = radius + 30
-            label_x = center_x + math.cos(angle_rad) * label_radius
-            label_y = center_y + math.sin(angle_rad) * label_radius
-            painter.setPen(QColor("#333333"))
-            painter.drawText(
-                int(label_x - 30), int(label_y - 10), 60, 20,
-                Qt.AlignmentFlag.AlignCenter,
-                f"{position:,}",
-            )
-
-        # center title (drawn once, outside the loop)
-        title_font = QFont()
-        title_font.setPointSize(12)
-        title_font.setBold(True)
-        painter.setFont(title_font)
-        painter.setPen(QColor("#222222"))
-        painter.drawText(
-            int(center_x - radius), int(center_y - 35), int(radius * 2), 30,
-            Qt.AlignmentFlag.AlignCenter,
-            self.title,
-        )
-
-        # sequence length
-        length_font = QFont()
-        length_font.setPointSize(11)
-        painter.setFont(length_font)
-        painter.setPen(QColor("#555555"))
-        painter.drawText(
-            int(center_x - radius), int(center_y + 5), int(radius * 2), 30,
-            Qt.AlignmentFlag.AlignCenter,
-            f"{sequence_length:,} bp",
-        )
-
-
-# Main GUI window
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"NZoom Alpha Test {VERSION}")
-        self.resize(1200, 750)
+        self.setWindowTitle(f"N-Zoom {VERSION}")
+        self.resize(1300, 820)
 
+        self.settings = QSettings("mikeph52", "N-Zoom")
         self.records = []
         self.current_record = None
+        self.current_sequence = ""
+        self.current_features = []
 
         self.build_ui()
         self.build_menu()
 
+    # UI
     def build_menu(self):
-        # File menu
         file_menu = self.menuBar().addMenu("File")
 
-        open_action = QAction("Open FASTA...", self)
+        open_action = QAction("Open...", self)
         open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.open_fasta)
+        open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
+
+        save_action = QAction("Save As...", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_as)
+        file_menu.addAction(save_action)
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
-        exit_action.setShortcut("Ctrl+Q")  # Ctrl+C is copy; don't use it for exit
+        exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Tools menu
         tools_menu = self.menuBar().addMenu("Tools")
 
-        ncbi_action = QAction("Fetch data from NCBI", self)
-        ncbi_action.setEnabled(False)  # not implemented yet
+        ncbi_action = QAction("Fetch from NCBI...", self)
+        ncbi_action.triggered.connect(self.fetch_from_ncbi)
         tools_menu.addAction(ncbi_action)
         tools_menu.addSeparator()
 
         translate_action = QAction("Translate sequence", self)
         translate_action.triggered.connect(self.show_translation)
         tools_menu.addAction(translate_action)
-        tools_menu.addSeparator()
 
         rs_action = QAction("Find restriction sites", self)
-        rs_action.setEnabled(False)  # not implemented yet
+        rs_action.triggered.connect(self.find_restriction_sites)
         tools_menu.addAction(rs_action)
 
-        # About menu
+        clear_rs_action = QAction("Clear restriction sites", self)
+        clear_rs_action.triggered.connect(lambda: self.circular_viewer.set_sites({}))
+        tools_menu.addAction(clear_rs_action)
+
         about_menu = self.menuBar().addMenu("About")
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
@@ -281,11 +113,14 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root_layout = QVBoxLayout(root)
 
+        # top bar
         top_bar = QHBoxLayout()
-        open_button = QPushButton("Open FASTA")
-        open_button.clicked.connect(self.open_fasta)
+        open_button = QPushButton("Open")
+        open_button.clicked.connect(self.open_file)
         top_bar.addWidget(open_button)
-
+        ncbi_button = QPushButton("Fetch from NCBI")
+        ncbi_button.clicked.connect(self.fetch_from_ncbi)
+        top_bar.addWidget(ncbi_button)
         self.file_label = QLabel("No file loaded")
         self.file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         top_bar.addWidget(self.file_label, 1)
@@ -293,14 +128,15 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
+        # left: record list
         self.sequence_list = QListWidget()
         self.sequence_list.setMinimumWidth(230)
         self.sequence_list.currentRowChanged.connect(self.select_record)
         splitter.addWidget(self.sequence_list)
 
+        # center: title, viewer tabs, feature table
         center = QWidget()
         center_layout = QVBoxLayout(center)
-
         self.sequence_title = QLabel("Sequence")
         title_font = self.sequence_title.font()
         title_font.setBold(True)
@@ -308,15 +144,33 @@ class MainWindow(QMainWindow):
         self.sequence_title.setFont(title_font)
         center_layout.addWidget(self.sequence_title)
 
+        center_split = QSplitter(Qt.Orientation.Vertical)
+
         self.view_tabs = QTabWidget()
+        self.circular_viewer = CircularDNAViewer()
+        self.circular_viewer.featureClicked.connect(self.select_feature_row)
+        self.view_tabs.addTab(self.circular_viewer, "Map")
         self.viewer = SequenceViewer()
         self.view_tabs.addTab(self.viewer, "Sequence")
-        self.circular_viewer = CircularDNAViewer()
-        self.view_tabs.addTab(self.circular_viewer, "Circular Map")
-        center_layout.addWidget(self.view_tabs, 1)
+        center_split.addWidget(self.view_tabs)
 
+        self.feature_table = QTableWidget(0, 6)
+        self.feature_table.setHorizontalHeaderLabels(
+            ["Type", "Name", "Start", "End", "Strand", "Length"]
+        )
+        self.feature_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.feature_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.feature_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.feature_table.verticalHeader().setVisible(False)
+        self.feature_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.feature_table.itemSelectionChanged.connect(self.on_feature_selected)
+        center_split.addWidget(self.feature_table)
+        center_split.setSizes([520, 200])
+
+        center_layout.addWidget(center_split, 1)
         splitter.addWidget(center)
 
+        # right: info + actions
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
@@ -324,140 +178,301 @@ class MainWindow(QMainWindow):
         form = QFormLayout(info_box)
         self.type_value = QLabel("-")
         self.length_value = QLabel("-")
+        self.topology_value = QLabel("-")
         self.gc_value = QLabel("-")
+        self.features_value = QLabel("-")
         self.composition_value = QLabel("-")
         self.composition_value.setWordWrap(True)
         form.addRow("Type:", self.type_value)
         form.addRow("Length:", self.length_value)
+        form.addRow("Topology:", self.topology_value)
         form.addRow("GC %:", self.gc_value)
+        form.addRow("Features:", self.features_value)
         form.addRow("Composition:", self.composition_value)
         right_layout.addWidget(info_box)
 
         actions_box = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_box)
-
-        copy_button = QPushButton("Copy sequence")
-        copy_button.clicked.connect(self.copy_seq)
-        actions_layout.addWidget(copy_button)
-
-        reverse_button = QPushButton("Reverse complement")
-        reverse_button.clicked.connect(self.show_reverse_complement)
-        actions_layout.addWidget(reverse_button)
-
-        translate_button = QPushButton("Translate DNA")
-        translate_button.clicked.connect(self.show_translation)
-        actions_layout.addWidget(translate_button)
-
+        for text, slot in (
+            ("Copy sequence", self.copy_seq),
+            ("Reverse complement", self.show_reverse_complement),
+            ("Translate DNA", self.show_translation),
+            ("Find restriction sites", self.find_restriction_sites),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            actions_layout.addWidget(button)
         right_layout.addWidget(actions_box)
         right_layout.addStretch()
 
         splitter.addWidget(right_panel)
-        splitter.setSizes([240, 700, 260])
+        splitter.setSizes([240, 800, 260])
         root_layout.addWidget(splitter, 1)
 
         self.setCentralWidget(root)
         self.statusBar().showMessage("Ready")
 
-    def open_fasta(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open FASTA file", "",
-            "FASTA files (*.fasta *.fa *.faa *.fna *.fas);;All files (*)",
-        )
+    # loading
+    def open_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open sequence file", "", OPEN_FILTER)
         if not path:
             return
         try:
-            records = list(SeqIO.parse(path, "fasta"))
+            records, fmt = st.load_records(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Could not read FASTA file:\n{exc}")
+            QMessageBox.critical(self, "Error", f"Could not read file:\n{exc}")
             return
         if not records:
-            QMessageBox.warning(self, "No sequences", "No FASTA records were found.")
+            QMessageBox.warning(self, "No sequences", f"No {fmt.upper()} records were found.")
             return
 
+        self.show_records(records)
+        self.file_label.setText(str(Path(path)))
+        self.statusBar().showMessage(f"Loaded {len(records)} {fmt} record(s)")
+
+    def fetch_from_ncbi(self):
+        accession, ok = QInputDialog.getText(
+            self, "Fetch from NCBI", "Nucleotide accession (e.g. L09137 for pUC19):"
+        )
+        accession = accession.strip()
+        if not ok or not accession:
+            return
+
+        email = self.settings.value("ncbi_email", "")
+        if not email:
+            email, ok = QInputDialog.getText(
+                self, "NCBI e-mail",
+                "NCBI asks for an e-mail address with every request.\n"
+                "It's saved locally and only sent to NCBI:",
+            )
+            email = email.strip()
+            if not ok or "@" not in email:
+                return
+            self.settings.setValue("ncbi_email", email)
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage(f"Fetching {accession} from NCBI...")
+        QApplication.processEvents()
+        try:
+            record = st.fetch_genbank(accession, email)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage("NCBI fetch failed", 5000)
+            QMessageBox.critical(self, "NCBI error", f"Could not fetch {accession}:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+
+        # add to whatever is already open
+        self.show_records(self.records + [record], select=len(self.records))
+        self.statusBar().showMessage(f"Fetched {record.id} from NCBI", 5000)
+
+    def show_records(self, records, select=0):
         self.records = records
         self.current_record = None
+        self.sequence_list.blockSignals(True)
         self.sequence_list.clear()
-
         for record in records:
             label = record.id
             if record.description and record.description != record.id:
                 label += f" — {record.description}"
             self.sequence_list.addItem(label)
+        self.sequence_list.blockSignals(False)
+        self.sequence_list.setCurrentRow(select)
+        self.select_record(select)
 
-        self.file_label.setText(str(Path(path)))
-        self.statusBar().showMessage(f"Loaded {len(records)} sequence(s)")
-        self.sequence_list.setCurrentRow(0)
+    def save_as(self):
+        if not self.records:
+            QMessageBox.information(self, "Nothing to save", "Open or fetch a sequence first.")
+            return
+        path, chosen = QFileDialog.getSaveFileName(self, "Save sequences", "", SAVE_FILTER)
+        if not path:
+            return
+        fmt = "genbank" if chosen.startswith("GenBank") else "fasta"
+        if not Path(path).suffix:
+            path += ".gb" if fmt == "genbank" else ".fasta"
+        try:
+            st.save_records(self.records, path, fmt)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Could not save file:\n{exc}")
+            return
+        self.statusBar().showMessage(f"Saved {len(self.records)} record(s) to {path}", 5000)
 
-    def select_record(self, index: int):
+    # display
+    def select_record(self, index):
         if index < 0 or index >= len(self.records):
             return
 
         record = self.records[index]
         self.current_record = record
-
-        sequence = normalize_seq(str(record.seq))
-        seq_type = detect_seq_type(sequence)
+        sequence = st.record_sequence(record)
+        seq_type = st.detect_seq_type(sequence)
+        self.current_sequence = sequence
+        self.current_features = st.display_features(record)
 
         self.sequence_title.setText(record.description or record.id)
         self.viewer.set_sequence(sequence, seq_type)
 
-        # circular map only makes sense for DNA
+        # map only makes sense for DNA
         if seq_type == "DNA":
-            self.circular_viewer.set_seq(sequence, record.id)
-            self.view_tabs.setTabEnabled(1, True)
+            self.circular_viewer.set_record(len(sequence), record.id, self.current_features)
+            self.view_tabs.setTabEnabled(0, True)
         else:
             self.circular_viewer.clear_seq()
-            self.view_tabs.setTabEnabled(1, False)
-            self.view_tabs.setCurrentIndex(0)
+            self.view_tabs.setTabEnabled(0, False)
+            self.view_tabs.setCurrentIndex(1)
 
+        self.fill_feature_table()
+
+        # info panel
         self.type_value.setText(seq_type)
         self.length_value.setText(f"{len(sequence):,}")
+        self.topology_value.setText(st.topology(record))
+        self.features_value.setText(str(len(self.current_features)))
 
         counts = Counter(sequence)
-        total = len(sequence)
-
-        if seq_type == "DNA" and total:
-            gc = ((counts.get("G", 0) + counts.get("C", 0)) / total) * 100
+        if seq_type == "DNA" and sequence:
+            gc = (counts.get("G", 0) + counts.get("C", 0)) / len(sequence) * 100
             self.gc_value.setText(f"{gc:.2f}%")
         else:
             self.gc_value.setText("N/A")
-
-        common = counts.most_common(12)
-        composition = ", ".join(f"{base}: {count:,}" for base, count in common)
+        composition = ", ".join(f"{base}: {count:,}" for base, count in counts.most_common(12))
         self.composition_value.setText(composition or "-")
+
+    def fill_feature_table(self):
+        table = self.feature_table
+        table.blockSignals(True)
+        table.setSortingEnabled(False)
+        table.setRowCount(len(self.current_features))
+
+        strand_text = {1: "→", -1: "←", 0: "·"}
+        for row, feature in enumerate(self.current_features):
+            parts = st.feature_parts(feature)
+            start, end = st.feature_span(feature)  # 1-based like GenBank
+            length = sum(e - s for s, e in parts)
+
+            type_item = QTableWidgetItem(feature.type)
+            type_item.setData(Qt.ItemDataRole.UserRole, row)  # index into current_features
+            table.setItem(row, 0, type_item)
+            table.setItem(row, 1, QTableWidgetItem(st.feature_label(feature)))
+            table.setItem(row, 2, number_item(start))
+            table.setItem(row, 3, number_item(end))
+            table.setItem(row, 4, QTableWidgetItem(strand_text[st.feature_strand(feature)]))
+            table.setItem(row, 5, number_item(length))
+
+        table.setSortingEnabled(True)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.blockSignals(False)
+
+    def on_feature_selected(self):
+        rows = self.feature_table.selectionModel().selectedRows()
+        if not rows:
+            self.viewer.setExtraSelections([])
+            self.circular_viewer.set_selected(-1)
+            return
+        index = self.feature_table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        feature = self.current_features[index]
+        self.viewer.highlight_parts(st.feature_parts(feature))
+        self.circular_viewer.set_selected(index)
+        self.statusBar().showMessage(
+            f"{feature.type}: {st.feature_label(feature)}  ({feature.location})", 8000
+        )
+
+    def select_feature_row(self, index):
+        # Called when a feature is clicked on the map.
+        for row in range(self.feature_table.rowCount()):
+            if self.feature_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == index:
+                self.feature_table.selectRow(row)
+                self.feature_table.scrollToItem(self.feature_table.item(row, 0))
+                return
+
+    # tools
+    def require_dna(self, what):
+        if self.current_record is None:
+            return False
+        if st.detect_seq_type(self.current_sequence) != "DNA":
+            QMessageBox.information(self, "DNA required", f"{what} is only available for DNA sequences.")
+            return False
+        return True
+
+    def find_restriction_sites(self):
+        if not self.require_dna("Restriction analysis"):
+            return
+        if len(self.current_sequence) > 2_000_000:
+            answer = QMessageBox.question(
+                self, "Large sequence",
+                "This sequence is very long, so the search may take a while. Continue?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        circular = st.is_circular(self.current_record)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            sites = st.find_restriction_sites(self.current_sequence, circular=circular)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Error", f"Restriction analysis failed:\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+
+        on_map = st.map_sites(sites)
+        self.circular_viewer.set_sites(on_map)
+        self.view_tabs.setCurrentIndex(0)
+        self.statusBar().showMessage(
+            f"{len(sites)} enzymes cut; {len(on_map)} unique 6+ bp sites shown on map", 8000
+        )
+        self.show_sites_dialog(sites, circular)
+
+    def show_sites_dialog(self, sites, circular):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Restriction sites")
+        dialog.resize(520, 560)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            f"Commercially available enzymes, {'circular' if circular else 'linear'} sequence. "
+            "Unique cutters with 6+ bp sites are drawn on the map."
+        ))
+
+        table = QTableWidget(len(sites), 3)
+        table.setHorizontalHeaderLabels(["Enzyme", "Cuts", "Positions"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        ordered = sorted(sites.items(), key=lambda item: (len(item[1]), item[0]))
+        for row, (name, positions) in enumerate(ordered):
+            shown = ", ".join(f"{p:,}" for p in positions[:12])
+            if len(positions) > 12:
+                shown += ", ..."
+            table.setItem(row, 0, QTableWidgetItem(name))
+            table.setItem(row, 1, number_item(len(positions)))
+            table.setItem(row, 2, QTableWidgetItem(shown))
+        table.setSortingEnabled(True)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def copy_seq(self):
         if self.current_record is None:
             return
-        QApplication.clipboard().setText(normalize_seq(str(self.current_record.seq)))
+        QApplication.clipboard().setText(self.current_sequence)
         self.statusBar().showMessage("Sequence copied to clipboard", 3000)
 
     def show_reverse_complement(self):
-        if self.current_record is None:
+        if not self.require_dna("Reverse complement"):
             return
-
-        sequence = normalize_seq(str(self.current_record.seq))
-        if detect_seq_type(sequence) != "DNA":
-            QMessageBox.information(self, "DNA required",
-                                    "Reverse complement is only available for DNA sequences.")
-            return
-
-        result = str(Seq(sequence).reverse_complement())
+        result = str(Seq(self.current_sequence).reverse_complement())
         QApplication.clipboard().setText(result)
-        QMessageBox.information(self, "Reverse complement",
-                                "Reverse complement copied to clipboard.")
+        QMessageBox.information(self, "Reverse complement", "Reverse complement copied to clipboard.")
 
     def show_translation(self):
-        if self.current_record is None:
+        if not self.require_dna("Translation"):
             return
-
-        sequence = normalize_seq(str(self.current_record.seq))
-        if detect_seq_type(sequence) != "DNA":
-            QMessageBox.information(self, "DNA required",
-                                    "Translation is only available for DNA sequences.")
-            return
-
-        clean = sequence.replace("-", "").replace("U", "T")
+        clean = self.current_sequence.replace("-", "").replace("U", "T")
         usable_length = len(clean) - (len(clean) % 3)
         if usable_length == 0:
             QMessageBox.warning(self, "Too short", "The sequence is too short to translate.")
@@ -465,25 +480,23 @@ class MainWindow(QMainWindow):
 
         protein = str(Seq(clean[:usable_length]).translate())
         QApplication.clipboard().setText(protein)
-
-        preview = protein[:500]
-        if len(protein) > 500:
-            preview += "\n..."
-
-        QMessageBox.information(self, "Translation",
-                                f"Protein translation copied to clipboard.\n\n{preview}")
+        preview = protein[:500] + ("\n..." if len(protein) > 500 else "")
+        QMessageBox.information(
+            self, "Translation", f"Protein translation copied to clipboard.\n\n{preview}"
+        )
 
     def show_about(self):
-        QMessageBox.about(self, "About N-Zoom",
-                          f"N-Zoom {VERSION}\nA lightweight sequence viewer by mikeph52.")
-
+        QMessageBox.about(
+            self, "About N-Zoom",
+            f"N-Zoom {VERSION}\nAn open-source lightweight sequence viewer by mikeph52.\n2026 GPL v3 licence.",
+        )
 
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName("N-Zoom")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
