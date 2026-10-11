@@ -23,14 +23,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QGroupBox,
     QFormLayout,
-    QTableWidget,
-    QSizePolicy,
     QTabWidget,
 )
 
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
 PROTEIN_CHARS = set("ABCDEFGHIKLMNPQRSTVWXYZJUO*-")
-VERSION = "0.4.1" # for build version
+VERSION = "0.5.1"  # for build version
+MAX_COLORED_LENGTH = 50_000  # above this, show plain text (coloring is slow)
 
 DNA_COLORS = {
     "A": "#2e7d32",
@@ -51,54 +50,74 @@ PROTEIN_COLORS = {
     "*": "#000000",
 }
 
-def normalize_seq(seq):
-    return "".join(seq.split()).upper() # remove any whitespace and force CASES.
 
-# detect if file contains dna or protein,!IMPORTANT! RNA returns as DNA.
+def normalize_seq(seq):
+    return "".join(seq.split()).upper()  # remove any whitespace and force uppercase
+
+
+# detect if sequence is DNA or protein. !IMPORTANT! RNA returns as DNA.
 def detect_seq_type(seq):
     seq = normalize_seq(seq)
     chars = set(seq)
-
+    if not chars:
+        return "Unknown"
     if chars <= DNA_CHARS:
         return "DNA"
     if chars <= PROTEIN_CHARS:
         return "Protein"
-    else:
-        return "Unknown"
+    return "Unknown"
 
-# Sequence Viewer function
+
+# Sequence viewer widget
 class SequenceViewer(QTextEdit):
     def __init__(self):
         super().__init__()
-        self.setReadOnly(True) # Maybe change letter for editing mode.
+
+        self.setReadOnly(True)  # maybe change later for editing mode
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        font = QFont("Monospace") # font settings
+
+        font = QFont("Monospace")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(11)
         self.setFont(font)
 
     def set_sequence(self, sequence, seq_type):
         self.clear()
-        colors = DNA_COLORS if seq_type == "DNA" else PROTEIN_COLORS
-        cursor = self.textCursor()
-        chunk_size = 10000
+        sequence = normalize_seq(sequence)
 
-        for offset in range(0, len(sequence), chunk_size):
-            chunk = sequence[offset:offset + chunk_size]
-            for char in chunk:
+        if len(sequence) > MAX_COLORED_LENGTH:
+            # big sequences: plain text, fast
+            self.setPlainText(sequence)
+        else:
+            colors = DNA_COLORS if seq_type == "DNA" else PROTEIN_COLORS
+            cursor = self.textCursor()
+            cursor.beginEditBlock()
+
+            # insert runs of identical characters with one format (much faster
+            # than one insertText call per character)
+            i = 0
+            n = len(sequence)
+            while i < n:
+                char = sequence[i]
+                j = i + 1
+                while j < n and sequence[j] == char:
+                    j += 1
                 fmt = QTextCharFormat()
                 fmt.setForeground(QColor(colors.get(char, "#424242")))
-                cursor.insertText(char, fmt)
-            if offset + chunk_size < len(sequence):
-                cursor.insertText("\n")
+                cursor.insertText(sequence[i:j], fmt)
+                i = j
 
-        self.moveCursor(self.textCursor().MoveOperation.Start)
+            cursor.endEditBlock()
 
-# CircularDNAViwer is a class for implementing circular DNA viwer in the app. Experimental feature.
+        cursor = self.textCursor()
+        cursor.movePosition(cursor.MoveOperation.Start)
+        self.setTextCursor(cursor)
+
+
+# Circular DNA map. Experimental feature.
 class CircularDNAViewer(QWidget):
     def __init__(self):
         super().__init__()
-
         self.sequence = ""
         self.title = "Circular DNA"
         self.setMinimumSize(400, 400)
@@ -115,39 +134,32 @@ class CircularDNAViewer(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # set background
         painter.fillRect(self.rect(), QColor("#ffffff"))
 
         if not self.sequence:
             painter.setPen(QColor("#777777"))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                "No circular DNA loaded",
-            )
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No circular DNA loaded")
             return
 
         width = self.width()
         height = self.height()
-
         center_x = width / 2
         center_y = height / 2
-
         radius = min(width, height) * 0.32
-        # draw dna
+
+        # backbone circle
         pen = QPen(QColor("#333333"))
         pen.setWidth(5)
         painter.setPen(pen)
-
         painter.drawEllipse(
             int(center_x - radius),
             int(center_y - radius),
             int(radius * 2),
             int(radius * 2),
         )
-        # tickmarks
-        sequence_length = len(self.sequence)
 
+        # tick marks
+        sequence_length = len(self.sequence)
         if sequence_length <= 1000:
             tick_interval = 100
         elif sequence_length <= 5000:
@@ -159,11 +171,15 @@ class CircularDNAViewer(QWidget):
         else:
             tick_interval = 10000
 
-        for position in range(0, sequence_length, tick_interval):
+        tick_pen = QPen(QColor("#555555"))
+        tick_pen.setWidth(2)
+        label_font = QFont()
+        label_font.setPointSize(9)
+        painter.setFont(label_font)
 
+        for position in range(0, sequence_length, tick_interval):
             fraction = position / sequence_length
-            angle = fraction * 360 - 90
-            angle_rad = math.radians(angle)
+            angle_rad = math.radians(fraction * 360 - 90)
             inner_radius = radius - 8
             outer_radius = radius + 8
 
@@ -172,67 +188,49 @@ class CircularDNAViewer(QWidget):
             x2 = center_x + math.cos(angle_rad) * outer_radius
             y2 = center_y + math.sin(angle_rad) * outer_radius
 
-            tick_pen = QPen(QColor("#555555"))
-            tick_pen.setWidth(2)
-
             painter.setPen(tick_pen)
-            painter.drawLine(
-                int(x1),
-                int(y1),
-                int(x2),
-                int(y2),
-            )
-            #tick labels
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+            # tick label
             label_radius = radius + 30
             label_x = center_x + math.cos(angle_rad) * label_radius
             label_y = center_y + math.sin(angle_rad) * label_radius
-
             painter.setPen(QColor("#333333"))
             painter.drawText(
-                int(label_x - 30),
-                int(label_y - 10),
-                60,
-                20,
+                int(label_x - 30), int(label_y - 10), 60, 20,
                 Qt.AlignmentFlag.AlignCenter,
                 f"{position:,}",
             )
-            # center title
-            title_font = QFont()
-            title_font.setPointSize(12)
-            title_font.setBold(True)
 
-            painter.setFont(title_font)
-            painter.setPen(QColor("#222222"))
-            painter.drawText(
-                int(center_x - radius),
-                int(center_y - 35),
-                int(radius * 2),
-                30,
-                Qt.AlignmentFlag.AlignCenter,
-                self.title,
-            )
-            # seq length
-            length_font = QFont()
-            length_font.setPointSize(11)
+        # center title (drawn once, outside the loop)
+        title_font = QFont()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#222222"))
+        painter.drawText(
+            int(center_x - radius), int(center_y - 35), int(radius * 2), 30,
+            Qt.AlignmentFlag.AlignCenter,
+            self.title,
+        )
 
-            painter.setFont(length_font)
-            painter.setPen(QColor("#555555"))
+        # sequence length
+        length_font = QFont()
+        length_font.setPointSize(11)
+        painter.setFont(length_font)
+        painter.setPen(QColor("#555555"))
+        painter.drawText(
+            int(center_x - radius), int(center_y + 5), int(radius * 2), 30,
+            Qt.AlignmentFlag.AlignCenter,
+            f"{sequence_length:,} bp",
+        )
 
-            painter.drawText(
-                int(center_x - radius),
-                int(center_y + 5),
-                int(radius * 2),
-                30,
-                Qt.AlignmentFlag.AlignCenter,
-                f"{sequence_length:,} bp",
-            )
-# Main GUI Window
+
+# Main GUI window
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-        # window elements
-        self.setWindowTitle("NZoom Alpha Test")
+        self.setWindowTitle(f"NZoom Alpha Test {VERSION}")
         self.resize(1200, 750)
 
         self.records = []
@@ -242,7 +240,7 @@ class MainWindow(QMainWindow):
         self.build_menu()
 
     def build_menu(self):
-        # file submenu
+        # File menu
         file_menu = self.menuBar().addMenu("File")
 
         open_action = QAction("Open FASTA...", self)
@@ -252,33 +250,37 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
-        exit_action.setShortcut("Ctrl+C")
+        exit_action.setShortcut("Ctrl+Q")  # Ctrl+C is copy; don't use it for exit
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # tools submenu
+        # Tools menu
         tools_menu = self.menuBar().addMenu("Tools")
 
         ncbi_action = QAction("Fetch data from NCBI", self)
+        ncbi_action.setEnabled(False)  # not implemented yet
         tools_menu.addAction(ncbi_action)
         tools_menu.addSeparator()
 
         translate_action = QAction("Translate sequence", self)
+        translate_action.triggered.connect(self.show_translation)
         tools_menu.addAction(translate_action)
         tools_menu.addSeparator()
 
         rs_action = QAction("Find restriction sites", self)
+        rs_action.setEnabled(False)  # not implemented yet
         tools_menu.addAction(rs_action)
 
-        # about submenu
+        # About menu
         about_menu = self.menuBar().addMenu("About")
         about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about)
         about_menu.addAction(about_action)
-        about_menu.addSeparator()
 
     def build_ui(self):
         root = QWidget()
         root_layout = QVBoxLayout(root)
+
         top_bar = QHBoxLayout()
         open_button = QPushButton("Open FASTA")
         open_button.clicked.connect(self.open_fasta)
@@ -288,7 +290,9 @@ class MainWindow(QMainWindow):
         self.file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         top_bar.addWidget(self.file_label, 1)
         root_layout.addLayout(top_bar)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
+
         self.sequence_list = QListWidget()
         self.sequence_list.setMinimumWidth(230)
         self.sequence_list.currentRowChanged.connect(self.select_record)
@@ -303,23 +307,21 @@ class MainWindow(QMainWindow):
         title_font.setPointSize(13)
         self.sequence_title.setFont(title_font)
         center_layout.addWidget(self.sequence_title)
-        # add tabs
+
         self.view_tabs = QTabWidget()
-        # linear dna
         self.viewer = SequenceViewer()
         self.view_tabs.addTab(self.viewer, "Sequence")
-        # circular dna
         self.circular_viewer = CircularDNAViewer()
         self.view_tabs.addTab(self.circular_viewer, "Circular Map")
         center_layout.addWidget(self.view_tabs, 1)
 
         splitter.addWidget(center)
+
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
         info_box = QGroupBox("Sequence information")
         form = QFormLayout(info_box)
-
         self.type_value = QLabel("-")
         self.length_value = QLabel("-")
         self.gc_value = QLabel("-")
@@ -329,8 +331,8 @@ class MainWindow(QMainWindow):
         form.addRow("Length:", self.length_value)
         form.addRow("GC %:", self.gc_value)
         form.addRow("Composition:", self.composition_value)
-
         right_layout.addWidget(info_box)
+
         actions_box = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_box)
 
@@ -351,15 +353,16 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(right_panel)
         splitter.setSizes([240, 700, 260])
-
         root_layout.addWidget(splitter, 1)
 
         self.setCentralWidget(root)
         self.statusBar().showMessage("Ready")
 
     def open_fasta(self):
-        path, _ = QFileDialog.getOpenFileName(self,"Open FASTA file","","FASTA files (*.fasta *.fa *.faa *.fna *.fas);;All files (*)")
-
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open FASTA file", "",
+            "FASTA files (*.fasta *.fa *.faa *.fna *.fas);;All files (*)",
+        )
         if not path:
             return
         try:
@@ -396,17 +399,16 @@ class MainWindow(QMainWindow):
         seq_type = detect_seq_type(sequence)
 
         self.sequence_title.setText(record.description or record.id)
-        # linear dna viwer
         self.viewer.set_sequence(sequence, seq_type)
 
-        # add circular viewer
+        # circular map only makes sense for DNA
         if seq_type == "DNA":
             self.circular_viewer.set_seq(sequence, record.id)
-
             self.view_tabs.setTabEnabled(1, True)
         else:
             self.circular_viewer.clear_seq()
             self.view_tabs.setTabEnabled(1, False)
+            self.view_tabs.setCurrentIndex(0)
 
         self.type_value.setText(seq_type)
         self.length_value.setText(f"{len(sequence):,}")
@@ -427,7 +429,6 @@ class MainWindow(QMainWindow):
     def copy_seq(self):
         if self.current_record is None:
             return
-
         QApplication.clipboard().setText(normalize_seq(str(self.current_record.seq)))
         self.statusBar().showMessage("Sequence copied to clipboard", 3000)
 
@@ -437,29 +438,25 @@ class MainWindow(QMainWindow):
 
         sequence = normalize_seq(str(self.current_record.seq))
         if detect_seq_type(sequence) != "DNA":
-            QMessageBox.information(self,"DNA required","Reverse complement is only available for DNA sequences.")
+            QMessageBox.information(self, "DNA required",
+                                    "Reverse complement is only available for DNA sequences.")
             return
 
         result = str(Seq(sequence).reverse_complement())
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Reverse complement")
-        dialog.setText("Reverse complement copied to clipboard.")
         QApplication.clipboard().setText(result)
-        dialog.exec()
+        QMessageBox.information(self, "Reverse complement",
+                                "Reverse complement copied to clipboard.")
 
     def show_translation(self):
         if self.current_record is None:
             return
 
         sequence = normalize_seq(str(self.current_record.seq))
-
         if detect_seq_type(sequence) != "DNA":
-            QMessageBox.information(
-                self,
-                "DNA required",
-                "Translation is only available for DNA sequences.",
-            )
+            QMessageBox.information(self, "DNA required",
+                                    "Translation is only available for DNA sequences.")
             return
+
         clean = sequence.replace("-", "").replace("U", "T")
         usable_length = len(clean) - (len(clean) % 3)
         if usable_length == 0:
@@ -473,17 +470,20 @@ class MainWindow(QMainWindow):
         if len(protein) > 500:
             preview += "\n..."
 
-        QMessageBox.information(
-            self,
-            "Translation",
-            f"Protein translation copied to clipboard.\n\n{preview}",
-        )
+        QMessageBox.information(self, "Translation",
+                                f"Protein translation copied to clipboard.\n\n{preview}")
+
+    def show_about(self):
+        QMessageBox.about(self, "About N-Zoom",
+                          f"N-Zoom {VERSION}\nA lightweight sequence viewer by mikeph52.")
+
 
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
