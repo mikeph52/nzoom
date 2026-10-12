@@ -226,6 +226,7 @@ class RestrictionSitesDialog(QDialog):
             table.setItem(row, 0, QTableWidgetItem(name))
             table.setItem(row, 1, number_item(len(positions)))
             table.setItem(row, 2, QTableWidgetItem(shown))
+        table.horizontalHeader().setSortIndicator(1, Qt.SortOrder.AscendingOrder)  # fewest cuts first
         table.setSortingEnabled(True)
         table.resizeColumnsToContents()
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
