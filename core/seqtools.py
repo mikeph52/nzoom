@@ -7,10 +7,13 @@ seqtools.py — sequence logic for N-Zoom (no GUI code in here).
 Type detection, file loading/saving, GenBank feature helpers,
 restriction-site search and NCBI fetching.
 """
+import copy
+import re
 from pathlib import Path
 
 from Bio import SeqIO, Entrez
 from Bio.Seq import Seq
+from Bio.SeqFeature import CompoundLocation, SeqFeature, SimpleLocation
 
 # ---------------------------------------------------------------- constants
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
@@ -18,6 +21,8 @@ PROTEIN_CHARS = set("ABCDEFGHIKLMNPQRSTVWXYZJUO*-")
 MAX_COLORED_LENGTH = 50_000  # above this the sequence view shows plain text
 
 GENBANK_SUFFIXES = {".gb", ".gbk", ".genbank", ".gbff"}
+GENBANK_NAME_LIMIT = 16      # max length of the name on a GenBank LOCUS line
+DEFAULT_MIN_ORF_AA = 100     # default minimum ORF length, in amino acids
 
 DNA_COLORS = {
     "A": "#2e7d32",
@@ -50,7 +55,15 @@ FEATURE_COLORS = {
     "RBS": "#8e24aa",
     "regulatory": "#f4511e",
     "misc_feature": "#757575",
+    "ORF": "#9ccc65",        # found by the ORF finder, not saved in the file
 }
+
+# feature types offered in the "Add feature" dialog (any text is allowed too)
+COMMON_FEATURE_TYPES = [
+    "CDS", "gene", "promoter", "terminator", "rep_origin", "primer_bind",
+    "protein_bind", "RBS", "regulatory", "misc_feature", "mRNA", "polyA_signal",
+    "enhancer", "LTR", "sig_peptide", "mat_peptide",
+]
 DEFAULT_FEATURE_COLOR = "#90a4ae"
 SKIP_FEATURE_TYPES = {"source"}  # covers the whole sequence, not useful to draw
 
@@ -92,15 +105,38 @@ def load_records(path):
     return list(SeqIO.parse(path, fmt)), fmt
 
 
+def genbank_locus_name(record):
+    """A name that fits the GenBank LOCUS line: no spaces, at most 16 characters."""
+    name = record.name if record.name and record.name != "<unknown name>" else record.id
+    name = re.sub(r"\s+", "_", name or "unnamed")
+    return name[:GENBANK_NAME_LIMIT]
+
+
 def save_records(records, path, fmt):
-    """Write records as 'genbank' or 'fasta'."""
+    """Write records as 'genbank' or 'fasta'.
+
+    The loaded records are not changed. Returns a list of (old name, new name)
+    for records whose name had to be shortened to fit the GenBank format.
+    """
+    renamed = []
     if fmt == "genbank":
+        prepared = []
         for record in records:
+            out = copy.copy(record)  # shallow copy: same sequence and features
+            out.annotations = dict(record.annotations)
             # GenBank output needs a molecule type; FASTA-loaded records lack one
-            if "molecule_type" not in record.annotations:
+            if "molecule_type" not in out.annotations:
                 is_protein = detect_seq_type(record_sequence(record)) == "Protein"
-                record.annotations["molecule_type"] = "protein" if is_protein else "DNA"
+                out.annotations["molecule_type"] = "protein" if is_protein else "DNA"
+            safe = genbank_locus_name(record)
+            if safe != record.name:
+                if len(record.name or "") > GENBANK_NAME_LIMIT or " " in (record.name or ""):
+                    renamed.append((record.name, safe))
+                out.name = safe
+            prepared.append(out)
+        records = prepared
     SeqIO.write(records, path, fmt)
+    return renamed
 
 
 # ---------------------------------------------------------------- features
@@ -147,6 +183,172 @@ def feature_strand(feature):
     """1, -1, or 0 for unknown / mixed."""
     strand = feature.location.strand if feature.location is not None else None
     return strand if strand in (1, -1) else 0
+
+
+def wraps_origin(feature, length):
+    """True for a two-part feature that runs over position 0 of a circular sequence."""
+    parts = sorted(feature_parts(feature))
+    return len(parts) == 2 and parts[0][0] == 0 and parts[1][1] == length
+
+
+def has_simple_location(feature, length):
+    """One continuous range, or one range that crosses the origin.
+    (Features made of several pieces, such as exons, are not 'simple'.)"""
+    return len(feature_parts(feature)) == 1 or wraps_origin(feature, length)
+
+
+def make_location(start, end, strand, length, circular):
+    """Build a location from 1-based, inclusive start/end (as people type them).
+
+    On a circular sequence start > end means the feature crosses the origin.
+    strand: 1, -1, or 0/None for no strand.
+    """
+    if not (1 <= start <= length and 1 <= end <= length):
+        raise ValueError(f"Start and end must be between 1 and {length:,}.")
+    strand = strand if strand in (1, -1) else None
+    if start <= end:
+        return SimpleLocation(start - 1, end, strand)
+    if not circular:
+        raise ValueError(
+            "Start is after end. Only features on circular sequences can cross the origin."
+        )
+    tail = SimpleLocation(start - 1, length, strand)  # start .. end of sequence
+    head = SimpleLocation(0, end, strand)             # 1 .. end
+    # parts are stored in biological (reading) order
+    return CompoundLocation([head, tail] if strand == -1 else [tail, head])
+
+
+def new_feature(feature_type, label, location, note=""):
+    qualifiers = {"label": [label]} if label else {}
+    if note:
+        qualifiers["note"] = [note]
+    return SeqFeature(location, type=feature_type, qualifiers=qualifiers)
+
+
+def make_feature(feature_type, label, start, end, strand, length, circular, note=""):
+    """Feature from 1-based, inclusive coordinates (see make_location)."""
+    return new_feature(feature_type, label,
+                       make_location(start, end, strand, length, circular), note)
+
+
+def update_feature(feature, feature_type, label, location=None, note=None):
+    """Change a feature in place."""
+    feature.type = feature_type
+    if label:
+        feature.qualifiers["label"] = [label]
+    else:
+        feature.qualifiers.pop("label", None)
+    if note is not None:
+        if note:
+            feature.qualifiers["note"] = [note]
+        else:
+            feature.qualifiers.pop("note", None)
+    if location is not None:
+        feature.location = location
+
+
+def feature_note(feature):
+    values = feature.qualifiers.get("note")
+    return str(values[0]) if values else ""
+
+
+# ---------------------------------------------------------------- regions
+def feature_sequence(sequence, feature):
+    """The feature's sequence read 5'->3' on its own strand (joins handled)."""
+    return str(feature.location.extract(Seq(sequence)))
+
+
+def reverse_complement(dna):
+    return str(Seq(dna).reverse_complement())
+
+
+def gc_percent(dna):
+    return (dna.count("G") + dna.count("C")) / len(dna) * 100 if dna else 0.0
+
+
+def translate_dna(dna, table=1, codon_start=1):
+    """Translate from base `codon_start` (1-3). Leftover bases are ignored."""
+    clean = normalize_seq(dna).replace("-", "").replace("U", "T")[codon_start - 1:]
+    usable = len(clean) - len(clean) % 3
+    return str(Seq(clean[:usable]).translate(table=table)) if usable else ""
+
+
+def feature_translation_settings(feature):
+    """(table, codon_start) from the feature's qualifiers, defaulting to (1, 1)."""
+    def first_int(key, default):
+        try:
+            return int(feature.qualifiers.get(key, [default])[0])
+        except (TypeError, ValueError):
+            return default
+    codon_start = first_int("codon_start", 1)
+    return first_int("transl_table", 1), codon_start if codon_start in (1, 2, 3) else 1
+
+
+# ---------------------------------------------------------------- ORFs
+def find_orfs(sequence, min_aa=DEFAULT_MIN_ORF_AA, circular=False, table=1):
+    """Open reading frames (ATG ... stop) in all six frames.
+
+    Returns SeqFeatures of type "ORF", sorted by position. Each runs from the
+    first ATG after a stop to the next stop codon (included). min_aa counts
+    amino acids without the stop. On circular sequences ORFs may cross the
+    origin.
+    """
+    from Bio.Data import CodonTable
+
+    stops = set(CodonTable.unambiguous_dna_by_id[table].stop_codons)
+    seq = normalize_seq(sequence).replace("U", "T")
+    length = len(seq)
+    if length < 6:
+        return []
+
+    best = {}  # (strand, stop position) -> (aa, start, end) in that strand's coordinates
+    for strand, strand_seq in ((1, seq), (-1, reverse_complement(seq))):
+        # scanning the sequence twice in a row finds ORFs that run over the origin
+        scan = strand_seq + strand_seq if circular else strand_seq
+        for frame in range(3):
+            orf_start = None
+            for i in range(frame, len(scan) - 2, 3):
+                if orf_start is None:
+                    if i >= length:
+                        break  # no new ORFs start in the second copy
+                    if scan[i:i + 3] == "ATG":
+                        orf_start = i
+                    continue
+                if i - orf_start >= length:
+                    orf_start = None  # went all the way round without a stop
+                    continue
+                if scan[i:i + 3] in stops:
+                    end = i + 3
+                    aa = (end - orf_start) // 3 - 1
+                    key = (strand, end % length)
+                    if aa >= min_aa and aa > best.get(key, (0,))[0]:
+                        best[key] = (aa, orf_start, end)
+                    orf_start = None
+
+    orfs = []
+    for (strand, _), (aa, a, b) in best.items():
+        if strand == 1:
+            if b <= length:
+                location = SimpleLocation(a, b, 1)
+            else:
+                location = CompoundLocation([SimpleLocation(a, length, 1),
+                                             SimpleLocation(0, b - length, 1)])
+            frame = f"+{a % 3 + 1}"
+        else:
+            # reverse-complement coordinate x is forward coordinate length - x
+            if b <= length:
+                location = SimpleLocation(length - b, length - a, -1)
+            else:
+                location = CompoundLocation([SimpleLocation(0, length - a, -1),
+                                             SimpleLocation(2 * length - b, length, -1)])
+            frame = f"-{a % 3 + 1}"
+        orfs.append(SeqFeature(location, type="ORF",
+                               qualifiers={"note": [f"frame {frame}, {aa} aa"], "aa": [aa]}))
+
+    orfs.sort(key=lambda f: min(s for s, _ in feature_parts(f)))
+    for number, orf in enumerate(orfs, 1):
+        orf.qualifiers["label"] = [f"ORF{number} ({orf.qualifiers['aa'][0]} aa)"]
+    return orfs
 
 
 # ---------------------------------------------------------------- restriction

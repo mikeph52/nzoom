@@ -6,14 +6,12 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from Bio.Seq import Seq
 from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -23,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -35,10 +34,11 @@ from PySide6.QtWidgets import (
 )
 
 from core import seqtools as st
+from core.dialogs import FeatureDialog, RestrictionSitesDialog, TextResultDialog, number_item
 from core.viewers import CircularDNAViewer, SequenceViewer
 from core.workers import Task
 
-VERSION = "0.8.1"
+VERSION = "0.9.1"
 
 OPEN_FILTER = (
     "Sequence files (*.gb *.gbk *.genbank *.gbff *.fasta *.fa *.faa *.fna *.fas);;"
@@ -46,79 +46,74 @@ OPEN_FILTER = (
     "FASTA files (*.fasta *.fa *.faa *.fna *.fas);;"
     "All files (*)"
 )
-SAVE_FILTER = "GenBank (*.gb);;FASTA (*.fasta)"
-
-
-def number_item(value):
-    """Table cell that sorts numerically."""
-    item = QTableWidgetItem()
-    item.setData(Qt.ItemDataRole.DisplayRole, value)
-    return item
+GENBANK_FILTER = "GenBank (*.gb)"
+FASTA_FILTER = "FASTA (*.fasta)"
+STRAND_TEXT = {1: "→", -1: "←", 0: "·"}
+STRAND_WORDS = {1: "forward strand", -1: "reverse strand", 0: "no strand"}
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"N-Zoom {VERSION}")
         self.resize(1300, 820)
 
         self.settings = QSettings("mikeph52", "N-Zoom")
         self.records = []
         self.current_record = None
         self.current_sequence = ""
-        self.current_features = []
+        self.current_features = []   # annotated features of the current record
+        self.current_orfs = []       # ORFs found by the ORF finder (not saved)
+        self.items = []              # features + ORFs: what the map and table show
 
-        # background work (NCBI downloads, restriction searches)
+        # file state
+        self.current_path = None     # where Save writes to
+        self.current_format = None   # "genbank" or "fasta"
+        self.modified = False
+
+        # background work (NCBI downloads, restriction searches, ORF finding)
         self.pool = QThreadPool(self)
-        self.tasks = {}           # kind -> running Task, e.g. {"ncbi": task}
+        self.tasks = {}              # kind -> running Task, e.g. {"ncbi": task}
         self.sites_dialog = None
 
         self.build_ui()
         self.build_menu()
+        self.update_title()
 
     # ================================================================ UI
     def build_menu(self):
         file_menu = self.menuBar().addMenu("File")
-
-        open_action = QAction("Open...", self)
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
-
-        save_action = QAction("Save As...", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_as)
-        file_menu.addAction(save_action)
+        self.add_action(file_menu, "Open...", self.open_file, "Ctrl+O")
+        self.add_action(file_menu, "Save", self.save, "Ctrl+S")
+        self.add_action(file_menu, "Save As...", self.save_as, "Ctrl+Shift+S")
         file_menu.addSeparator()
+        self.add_action(file_menu, "Exit", self.close, "Ctrl+Q")
 
-        exit_action = QAction("Exit", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        edit_menu = self.menuBar().addMenu("Edit")
+        self.add_action(edit_menu, "Add feature...", self.add_feature, "Ctrl+E")
+        self.add_action(edit_menu, "Edit selected feature...", self.edit_selected_feature)
+        self.add_action(edit_menu, "Delete selected feature", self.delete_selected_feature)
 
         tools_menu = self.menuBar().addMenu("Tools")
-
-        self.ncbi_action = QAction("Fetch from NCBI...", self)
-        self.ncbi_action.triggered.connect(self.fetch_from_ncbi)
-        tools_menu.addAction(self.ncbi_action)
+        self.ncbi_action = self.add_action(tools_menu, "Fetch from NCBI...", self.fetch_from_ncbi)
         tools_menu.addSeparator()
-
-        translate_action = QAction("Translate sequence", self)
-        translate_action.triggered.connect(self.show_translation)
-        tools_menu.addAction(translate_action)
-
-        self.rs_action = QAction("Find restriction sites", self)
-        self.rs_action.triggered.connect(self.find_restriction_sites)
-        tools_menu.addAction(self.rs_action)
-
-        clear_rs_action = QAction("Clear restriction sites", self)
-        clear_rs_action.triggered.connect(lambda: self.circular_viewer.set_sites({}))
-        tools_menu.addAction(clear_rs_action)
+        self.add_action(tools_menu, "Translate whole sequence", self.show_translation)
+        tools_menu.addSeparator()
+        self.rs_action = self.add_action(tools_menu, "Find restriction sites", self.find_restriction_sites)
+        self.add_action(tools_menu, "Clear restriction sites", lambda: self.circular_viewer.set_sites({}))
+        tools_menu.addSeparator()
+        self.orf_action = self.add_action(tools_menu, "Find ORFs...", self.find_orfs)
+        self.add_action(tools_menu, "Clear ORFs", self.clear_orfs)
 
         about_menu = self.menuBar().addMenu("About")
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self.show_about)
-        about_menu.addAction(about_action)
+        self.add_action(about_menu, "About", self.show_about)
+
+    def add_action(self, menu, text, slot, shortcut=None):
+        action = QAction(text, self)
+        if shortcut:
+            action.setShortcut(shortcut)
+        action.triggered.connect(slot)
+        menu.addAction(action)
+        return action
 
     def build_ui(self):
         root = QWidget()
@@ -160,9 +155,12 @@ class MainWindow(QMainWindow):
         self.view_tabs = QTabWidget()
         self.circular_viewer = CircularDNAViewer()
         self.circular_viewer.featureClicked.connect(self.select_feature_row)
+        self.circular_viewer.featureContextMenu.connect(self.map_context_menu)
         self.view_tabs.addTab(self.circular_viewer, "Map")
         self.viewer = SequenceViewer()
         self.viewer.selectionInfo.connect(self.on_sequence_selection)
+        self.viewer.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.viewer.customContextMenuRequested.connect(self.sequence_context_menu)
         self.view_tabs.addTab(self.viewer, "Sequence")
         center_split.addWidget(self.view_tabs)
 
@@ -176,6 +174,14 @@ class MainWindow(QMainWindow):
         self.feature_table.verticalHeader().setVisible(False)
         self.feature_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.feature_table.itemSelectionChanged.connect(self.on_feature_selected)
+        self.feature_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.feature_table.customContextMenuRequested.connect(self.table_context_menu)
+        self.feature_table.cellDoubleClicked.connect(
+            lambda row, _col: self.edit_item(self.item_index_at_row(row))
+        )
+        delete_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.feature_table)
+        delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_shortcut.activated.connect(self.delete_selected_feature)
         center_split.addWidget(self.feature_table)
         center_split.setSizes([520, 200])
 
@@ -205,17 +211,19 @@ class MainWindow(QMainWindow):
 
         actions_box = QGroupBox("Actions")
         actions_layout = QVBoxLayout(actions_box)
-        for text, slot in (
-            ("Copy sequence", self.copy_seq),
-            ("Reverse complement", self.show_reverse_complement),
-            ("Translate DNA", self.show_translation),
-        ):
+
+        def add_button(text, slot):
             button = QPushButton(text)
             button.clicked.connect(slot)
             actions_layout.addWidget(button)
-        self.rs_button = QPushButton("Find restriction sites")
-        self.rs_button.clicked.connect(self.find_restriction_sites)
-        actions_layout.addWidget(self.rs_button)
+            return button
+
+        add_button("Copy sequence", self.copy_seq)
+        add_button("Reverse complement", self.show_reverse_complement)
+        add_button("Translate DNA", self.show_translation)
+        self.rs_button = add_button("Find restriction sites", self.find_restriction_sites)
+        self.orf_button = add_button("Find ORFs", self.find_orfs)
+        add_button("Add feature", self.add_feature)
         right_layout.addWidget(actions_box)
         right_layout.addStretch()
 
@@ -240,8 +248,40 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.position_label)
         self.statusBar().showMessage("Ready")
 
+    # ================================================================ file state
+    def update_title(self):
+        name = Path(self.current_path).name if self.current_path else "Untitled"
+        if not self.records:
+            name = "No file"
+        self.setWindowTitle(f"N-Zoom {VERSION} — {name}{' *' if self.modified else ''}")
+
+    def set_modified(self, modified=True):
+        self.modified = modified
+        self.update_title()
+
+    def confirm_discard_changes(self):
+        """True if it's OK to throw away the current records (saving first if asked)."""
+        if not self.modified:
+            return True
+        answer = QMessageBox.question(
+            self, "Unsaved changes",
+            "You have unsaved changes. Save them first?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save()
+        return answer == QMessageBox.StandardButton.Discard
+
+    def has_annotations(self):
+        return any(st.display_features(record) for record in self.records)
+
     # ================================================================ loading
     def open_file(self):
+        if not self.confirm_discard_changes():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Open sequence file", "", OPEN_FILTER)
         if not path:
             return
@@ -254,8 +294,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No sequences", f"No {fmt.upper()} records were found.")
             return
 
+        self.current_path, self.current_format = path, fmt
         self.show_records(records)
         self.file_label.setText(str(Path(path)))
+        self.set_modified(False)
         self.statusBar().showMessage(f"Loaded {len(records)} {fmt} record(s)")
 
     def fetch_from_ncbi(self):
@@ -290,8 +332,9 @@ class MainWindow(QMainWindow):
         )
 
     def add_fetched_record(self, record):
-        # added to whatever is already open
+        # added to whatever is already open; not saved anywhere yet
         self.show_records(self.records + [record], select=len(self.records))
+        self.set_modified()
         self.statusBar().showMessage(f"Fetched {record.id} from NCBI", 5000)
 
     def show_records(self, records, select=0):
@@ -307,23 +350,61 @@ class MainWindow(QMainWindow):
         self.sequence_list.blockSignals(False)
         self.sequence_list.setCurrentRow(select)
         self.select_record(select)
+        self.update_title()
+
+    # ================================================================ saving
+    def save(self):
+        """Save to the current file. Returns True if the records were saved."""
+        if not self.records:
+            QMessageBox.information(self, "Nothing to save", "Open or fetch a sequence first.")
+            return False
+        # FASTA can't hold features: if there are any, ask where to save as GenBank
+        if self.current_path and (self.current_format == "genbank" or not self.has_annotations()):
+            return self.write_file(self.current_path, self.current_format)
+        return self.save_as()
 
     def save_as(self):
         if not self.records:
             QMessageBox.information(self, "Nothing to save", "Open or fetch a sequence first.")
-            return
-        path, chosen = QFileDialog.getSaveFileName(self, "Save sequences", "", SAVE_FILTER)
+            return False
+        suggested = GENBANK_FILTER if self.has_annotations() or self.current_format != "fasta" else FASTA_FILTER
+        start_dir = str(Path(self.current_path).with_suffix("")) if self.current_path else ""
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Save sequences", start_dir, f"{GENBANK_FILTER};;{FASTA_FILTER}", suggested
+        )
         if not path:
-            return
-        fmt = "genbank" if chosen.startswith("GenBank") else "fasta"
+            return False
+        fmt = "fasta" if chosen == FASTA_FILTER else "genbank"
         if not Path(path).suffix:
             path += ".gb" if fmt == "genbank" else ".fasta"
+        if fmt == "fasta" and self.has_annotations():
+            answer = QMessageBox.question(
+                self, "Features will be lost",
+                "FASTA files can't store features, so all annotations will be left out "
+                "of this file. Save as FASTA anyway?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        return self.write_file(path, fmt)
+
+    def write_file(self, path, fmt):
         try:
-            st.save_records(self.records, path, fmt)
+            renamed = st.save_records(self.records, path, fmt)
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Could not save file:\n{exc}")
-            return
+            return False
+        self.current_path, self.current_format = path, fmt
+        self.file_label.setText(str(Path(path)))
+        self.set_modified(False)
         self.statusBar().showMessage(f"Saved {len(self.records)} record(s) to {path}", 5000)
+        if renamed:
+            names = "\n".join(f"{old}  →  {new}" for old, new in renamed)
+            QMessageBox.information(
+                self, "Names shortened",
+                f"GenBank files allow at most {st.GENBANK_NAME_LIMIT} characters, without "
+                f"spaces, for a sequence name. These names were shortened in the file:\n\n{names}",
+            )
+        return True
 
     # ================================================================ display
     def select_record(self, index):
@@ -336,13 +417,15 @@ class MainWindow(QMainWindow):
         seq_type = st.detect_seq_type(sequence)
         self.current_sequence = sequence
         self.current_features = st.display_features(record)
+        self.current_orfs = []
+        self.items = list(self.current_features)
 
         self.sequence_title.setText(record.description or record.id)
         self.viewer.set_sequence(sequence, seq_type)
 
         # map only makes sense for DNA
         if seq_type == "DNA":
-            self.circular_viewer.set_record(len(sequence), record.id, self.current_features)
+            self.circular_viewer.set_record(len(sequence), record.id, self.items)
             self.view_tabs.setTabEnabled(0, True)
         else:
             self.circular_viewer.clear_seq()
@@ -355,51 +438,91 @@ class MainWindow(QMainWindow):
         self.type_value.setText(seq_type)
         self.length_value.setText(f"{len(sequence):,}")
         self.topology_value.setText(st.topology(record))
-        self.features_value.setText(str(len(self.current_features)))
+        self.update_feature_count()
 
         counts = Counter(sequence)
         if seq_type == "DNA" and sequence:
-            gc = (counts.get("G", 0) + counts.get("C", 0)) / len(sequence) * 100
-            self.gc_value.setText(f"{gc:.2f}%")
+            self.gc_value.setText(f"{st.gc_percent(sequence):.2f}%")
         else:
             self.gc_value.setText("N/A")
         composition = ", ".join(f"{base}: {count:,}" for base, count in counts.most_common(12))
         self.composition_value.setText(composition or "-")
 
+    def update_feature_count(self):
+        text = str(len(self.current_features))
+        if self.current_orfs:
+            count = len(self.current_orfs)
+            text += f"  (+ {count} ORF{'' if count == 1 else 's'})"
+        self.features_value.setText(text)
+
+    def refresh_features(self, select=None):
+        """Redraw map and table after features or ORFs changed.
+        `select`: a feature/ORF object to select afterwards."""
+        if self.current_record is None:
+            return
+        self.current_features = st.display_features(self.current_record)
+        self.items = self.current_features + self.current_orfs
+        if self.circular_viewer.length:
+            self.circular_viewer.set_features(self.items)
+        self.fill_feature_table()
+        self.update_feature_count()
+        if select is not None:
+            for index, item in enumerate(self.items):
+                if item is select:
+                    self.select_feature_row(index)
+                    break
+
+    def is_orf(self, index):
+        return index >= len(self.current_features)
+
     def fill_feature_table(self):
         table = self.feature_table
         table.blockSignals(True)
         table.setSortingEnabled(False)
-        table.setRowCount(len(self.current_features))
+        table.clearContents()
+        table.setRowCount(len(self.items))
 
-        strand_text = {1: "→", -1: "←", 0: "·"}
-        for row, feature in enumerate(self.current_features):
-            parts = st.feature_parts(feature)
+        orf_font = QFont(table.font())
+        orf_font.setItalic(True)
+        for row, feature in enumerate(self.items):
             start, end = st.feature_span(feature)  # 1-based like GenBank
-            length = sum(e - s for s, e in parts)
-
-            type_item = QTableWidgetItem(feature.type)
-            type_item.setData(Qt.ItemDataRole.UserRole, row)  # index into current_features
-            table.setItem(row, 0, type_item)
-            table.setItem(row, 1, QTableWidgetItem(st.feature_label(feature)))
-            table.setItem(row, 2, number_item(start))
-            table.setItem(row, 3, number_item(end))
-            table.setItem(row, 4, QTableWidgetItem(strand_text[st.feature_strand(feature)]))
-            table.setItem(row, 5, number_item(length))
+            length = sum(e - s for s, e in st.feature_parts(feature))
+            cells = [
+                QTableWidgetItem(feature.type),
+                QTableWidgetItem(st.feature_label(feature)),
+                number_item(start),
+                number_item(end),
+                QTableWidgetItem(STRAND_TEXT[st.feature_strand(feature)]),
+                number_item(length),
+            ]
+            cells[0].setData(Qt.ItemDataRole.UserRole, row)  # index into self.items
+            for column, cell in enumerate(cells):
+                if self.is_orf(row):  # ORFs: grey italic, so they read as "suggestions"
+                    cell.setForeground(Qt.GlobalColor.darkGray)
+                    cell.setFont(orf_font)
+                table.setItem(row, column, cell)
 
         table.setSortingEnabled(True)
         table.resizeColumnsToContents()
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         table.blockSignals(False)
+        self.on_feature_selected()
+
+    def item_index_at_row(self, row):
+        cell = self.feature_table.item(row, 0)
+        return cell.data(Qt.ItemDataRole.UserRole) if cell is not None else -1
+
+    def selected_item_index(self):
+        rows = self.feature_table.selectionModel().selectedRows()
+        return self.item_index_at_row(rows[0].row()) if rows else -1
 
     def on_feature_selected(self):
-        rows = self.feature_table.selectionModel().selectedRows()
-        if not rows:
+        index = self.selected_item_index()
+        if index < 0:
             self.viewer.setExtraSelections([])
             self.circular_viewer.set_selected(-1)
             return
-        index = self.feature_table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        feature = self.current_features[index]
+        feature = self.items[index]
         self.viewer.highlight_parts(st.feature_parts(feature))
         self.circular_viewer.set_selected(index)
         self.statusBar().showMessage(
@@ -407,9 +530,9 @@ class MainWindow(QMainWindow):
         )
 
     def select_feature_row(self, index):
-        """Called when a feature is clicked on the map."""
+        """Select the table row showing self.items[index] (e.g. after a map click)."""
         for row in range(self.feature_table.rowCount()):
-            if self.feature_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == index:
+            if self.item_index_at_row(row) == index:
                 self.feature_table.selectRow(row)
                 self.feature_table.scrollToItem(self.feature_table.item(row, 0))
                 return
@@ -430,20 +553,222 @@ class MainWindow(QMainWindow):
             self.circular_viewer.set_highlight()
             return
 
-        text = f"Selected {start + 1:,}\u2013{end:,}  ({end - start:,} {unit})"
+        text = f"Selected {start + 1:,}–{end:,}  ({end - start:,} {unit})"
         if is_dna:
-            region = sequence[start:end]
-            gc = (region.count("G") + region.count("C")) / len(region) * 100
-            text += f"  \u00b7  GC {gc:.1f}%"
+            text += f"  ·  GC {st.gc_percent(sequence[start:end]):.1f}%"
             self.circular_viewer.set_highlight(start, end)
         self.position_label.setText(text)
+
+    # ================================================================ right-click menus
+    def is_dna(self):
+        return bool(self.current_sequence) and st.detect_seq_type(self.current_sequence) == "DNA"
+
+    def sequence_context_menu(self, pos):
+        self.build_selection_menu().exec(self.viewer.mapToGlobal(pos))
+
+    def table_context_menu(self, pos):
+        row = self.feature_table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.feature_table.selectRow(row)
+        menu = self.build_item_menu(self.item_index_at_row(row))
+        menu.exec(self.feature_table.viewport().mapToGlobal(pos))
+
+    def map_context_menu(self, index, global_pos):
+        self.select_feature_row(index)
+        self.build_item_menu(index).exec(global_pos)
+
+    def build_selection_menu(self):
+        """Menu for the Sequence view: acts on the selected bases."""
+        menu = QMenu(self)
+        selection = self.viewer.selected_range()
+        if selection:
+            start, end = selection
+            region = self.current_sequence[start:end]
+            where = f"{start + 1:,}–{end:,}"
+            menu.addAction("Copy", lambda: self.copy_text(region, f"Copied {len(region):,} bases"))
+            if self.is_dna():
+                menu.addAction("Copy reverse complement", lambda: self.copy_text(
+                    st.reverse_complement(region), "Reverse complement copied"))
+                menu.addSeparator()
+                menu.addAction("Translate selection", lambda: self.show_protein(
+                    region, f"Selection {where}, forward strand"))
+                menu.addAction("Translate reverse complement", lambda: self.show_protein(
+                    st.reverse_complement(region), f"Selection {where}, reverse strand"))
+            menu.addSeparator()
+            menu.addAction("Create feature from selection...",
+                           lambda: self.add_feature(start=start + 1, end=end))
+            menu.addSeparator()
+        else:
+            menu.addAction("Add feature...", self.add_feature)
+        menu.addAction("Select all", self.viewer.selectAll)
+        return menu
+
+    def build_item_menu(self, index):
+        """Menu for one feature or ORF (feature table or map)."""
+        menu = QMenu(self)
+        if index < 0 or index >= len(self.items):
+            return menu
+        item = self.items[index]
+        orf = self.is_orf(index)
+
+        title = menu.addAction(f"{item.type}: {st.feature_label(item)}")
+        title.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Select in sequence", lambda: self.select_item_in_sequence(index))
+        menu.addAction("Copy sequence", lambda: self.copy_text(
+            st.feature_sequence(self.current_sequence, item),
+            f"Copied sequence of {st.feature_label(item)}"))
+        if self.is_dna():
+            menu.addAction("Translate", lambda: self.translate_item(index))
+        menu.addSeparator()
+        if orf:
+            menu.addAction("Add as CDS feature...", lambda: self.add_orf_as_feature(index))
+        else:
+            menu.addAction("Edit feature...", lambda: self.edit_item(index))
+            menu.addAction("Delete feature", lambda: self.delete_item(index))
+        return menu
+
+    # ================================================================ region actions
+    def copy_text(self, text, message):
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(message, 3000)
+
+    def show_protein(self, dna, description, table=1, codon_start=1, expected=None):
+        """Translate `dna` and show the protein in a result window."""
+        protein = st.translate_dna(dna, table=table, codon_start=codon_start)
+        if not protein:
+            QMessageBox.warning(self, "Too short", "There are fewer than 3 bases to translate.")
+            return None
+        ends_with_stop = protein.endswith("*")
+        amino_acids = len(protein) - ends_with_stop
+        details = [description, f"{len(dna):,} bp → {amino_acids:,} aa"
+                   + (" + stop" if ends_with_stop else "")]
+        if table != 1:
+            details.append(f"genetic code {table}")
+        if codon_start != 1:
+            details.append(f"starting at base {codon_start}")
+        leftover = (len(dna) - codon_start + 1) % 3
+        if leftover:
+            details.append(f"last {leftover} base(s) ignored")
+        if "*" in protein[:-1]:
+            details.append(f"{protein[:-1].count('*')} internal stop codon(s)")
+        if expected:
+            same = protein.rstrip("*") == expected.rstrip("*")
+            details.append("matches the /translation stored in the file" if same
+                           else "differs from the /translation stored in the file")
+        TextResultDialog(self, "Translation", "  ·  ".join(details), protein).show()
+        return protein
+
+    def translate_item(self, index):
+        item = self.items[index]
+        table, codon_start = st.feature_translation_settings(item)
+        start, end = st.feature_span(item)
+        strand = STRAND_WORDS[st.feature_strand(item)]
+        self.show_protein(
+            st.feature_sequence(self.current_sequence, item),
+            f"{st.feature_label(item)} ({item.type}, {start:,}–{end:,}, {strand})",
+            table=table, codon_start=codon_start,
+            expected=item.qualifiers.get("translation", [None])[0],
+        )
+
+    def select_item_in_sequence(self, index):
+        item = self.items[index]
+        parts = st.feature_parts(item)
+        self.view_tabs.setCurrentWidget(self.viewer)
+        if len(parts) == 1:
+            self.viewer.select_range(*parts[0])  # a real selection: readout + menu work on it
+        else:
+            self.viewer.highlight_parts(parts)   # pieces can't be one selection; highlight them
+
+    # ================================================================ feature editing
+    def add_feature(self, start=None, end=None, strand=1, feature_type="misc_feature", name=""):
+        if self.current_record is None or not self.current_sequence:
+            QMessageBox.information(self, "No sequence", "Open or fetch a sequence first.")
+            return None
+        if start is None:  # default to the current selection, if any
+            selection = self.viewer.selected_range()
+            start, end = (selection[0] + 1, selection[1]) if selection else (1, 1)
+        dialog = FeatureDialog(
+            self, len(self.current_sequence), st.is_circular(self.current_record),
+            start=start, end=end, strand=strand, feature_type=feature_type, name=name,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        values = dialog.values()
+        feature = st.new_feature(values["type"], values["name"], values["location"], values["note"])
+        self.current_record.features.append(feature)
+        self.after_feature_change(feature, f"Added {values['type']} “{st.feature_label(feature)}”")
+        return feature
+
+    def add_orf_as_feature(self, index):
+        orf = self.items[index]
+        start, end = st.feature_span(orf)
+        number = st.feature_label(orf).split()[0]  # "ORF3"
+        feature = self.add_feature(start=start, end=end, strand=st.feature_strand(orf),
+                                   feature_type="CDS", name=number)
+        if feature is not None and orf in self.current_orfs:
+            # it's a real feature now, so drop the ORF suggestion to avoid a duplicate
+            self.current_orfs = [o for o in self.current_orfs if o is not orf]
+            self.refresh_features(select=feature)
+
+    def edit_item(self, index):
+        if index < 0 or index >= len(self.items):
+            return
+        if self.is_orf(index):
+            self.add_orf_as_feature(index)
+            return
+        feature = self.items[index]
+        dialog = FeatureDialog(
+            self, len(self.current_sequence), st.is_circular(self.current_record), feature=feature
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        st.update_feature(feature, values["type"], values["name"],
+                          location=values["location"], note=values["note"])
+        self.after_feature_change(feature, f"Updated “{st.feature_label(feature)}”")
+
+    def delete_item(self, index):
+        if index < 0 or index >= len(self.items) or self.is_orf(index):
+            return
+        feature = self.items[index]
+        answer = QMessageBox.question(
+            self, "Delete feature",
+            f"Delete the {feature.type} “{st.feature_label(feature)}”?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        features = self.current_record.features
+        for position, candidate in enumerate(features):
+            if candidate is feature:  # by identity: two features can look identical
+                del features[position]
+                break
+        self.after_feature_change(None, f"Deleted “{st.feature_label(feature)}”")
+
+    def after_feature_change(self, feature, message):
+        self.set_modified()
+        self.refresh_features(select=feature)
+        self.statusBar().showMessage(message, 5000)
+
+    def edit_selected_feature(self):
+        index = self.selected_item_index()
+        if index < 0:
+            QMessageBox.information(self, "No feature selected", "Select a feature in the table first.")
+            return
+        self.edit_item(index)
+
+    def delete_selected_feature(self):
+        index = self.selected_item_index()
+        if index >= 0:
+            self.delete_item(index)
 
     # ================================================================ background tasks
     def start_task(self, kind, message, fn, *args, on_done=None, on_fail=None, **kwargs):
         """Run fn(*args, **kwargs) on a background thread.
 
-        `kind` names the job ("ncbi", "restriction"); only one job of each kind
-        runs at a time. on_done(result) / on_fail(message) run in the GUI thread.
+        `kind` names the job ("ncbi", "restriction", "orfs"); only one job of each
+        kind runs at a time. on_done(result) / on_fail(message) run in the GUI thread.
         """
         if kind in self.tasks:
             self.statusBar().showMessage("Still working on the previous request...", 3000)
@@ -481,11 +806,15 @@ class MainWindow(QMainWindow):
         for kind, widgets in (
             ("ncbi", (self.ncbi_action, self.ncbi_button)),
             ("restriction", (self.rs_action, self.rs_button)),
+            ("orfs", (self.orf_action, self.orf_button)),
         ):
             for widget in widgets:
                 widget.setEnabled(kind not in self.tasks)
 
     def closeEvent(self, event):
+        if not self.confirm_discard_changes():
+            event.ignore()
+            return
         if self.tasks:
             # can't interrupt a download midway; wait for it so we exit cleanly
             self.statusBar().showMessage("Finishing background work before closing...")
@@ -493,6 +822,16 @@ class MainWindow(QMainWindow):
             self.pool.waitForDone()
             QApplication.restoreOverrideCursor()
         super().closeEvent(event)
+
+    def stale(self, record, what):
+        """True (and a status message) if the user switched records while `what` ran."""
+        if record is self.current_record:
+            return False
+        self.statusBar().showMessage(
+            f"{what} for {record.id} finished, but another record is selected now. "
+            "Run it again to see the results.", 8000
+        )
+        return True
 
     # ================================================================ tools
     def require_dna(self, what):
@@ -526,92 +865,93 @@ class MainWindow(QMainWindow):
         )
 
     def show_restriction_results(self, record, circular, sites):
-        if record is not self.current_record:
-            # the user switched records while the search was running
-            self.statusBar().showMessage(
-                f"Restriction search for {record.id} finished, but another record "
-                "is selected now. Run it again to see the results.", 8000
-            )
+        if self.stale(record, "Restriction search"):
             return
-
         on_map = st.map_sites(sites)
         self.circular_viewer.set_sites(on_map)
         self.view_tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
             f"{len(sites)} enzymes cut; {len(on_map)} unique 6+ bp sites shown on map", 8000
         )
-        self.show_sites_dialog(sites, circular)
-
-    def show_sites_dialog(self, sites, circular):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Restriction sites")
-        dialog.resize(520, 560)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(
-            f"Commercially available enzymes, {'circular' if circular else 'linear'} sequence. "
-            "Unique cutters with 6+ bp sites are drawn on the map."
-        ))
-
-        table = QTableWidget(len(sites), 3)
-        table.setHorizontalHeaderLabels(["Enzyme", "Cuts", "Positions"])
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        ordered = sorted(sites.items(), key=lambda item: (len(item[1]), item[0]))
-        for row, (name, positions) in enumerate(ordered):
-            shown = ", ".join(f"{p:,}" for p in positions[:12])
-            if len(positions) > 12:
-                shown += ", ..."
-            table.setItem(row, 0, QTableWidgetItem(name))
-            table.setItem(row, 1, number_item(len(positions)))
-            table.setItem(row, 2, QTableWidgetItem(shown))
-        table.setSortingEnabled(True)
-        table.resizeColumnsToContents()
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(table)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
         # non-modal: the main window stays usable while the list is open
         if self.sites_dialog is not None:
             self.sites_dialog.close()
-        self.sites_dialog = dialog
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dialog.destroyed.connect(self.forget_sites_dialog)
-        dialog.show()
+        self.sites_dialog = RestrictionSitesDialog(self, sites, circular)
+        self.sites_dialog.destroyed.connect(self.forget_sites_dialog)
+        self.sites_dialog.show()
 
     def forget_sites_dialog(self):
         self.sites_dialog = None
 
+    def find_orfs(self):
+        if not self.require_dna("The ORF finder"):
+            return
+        min_aa, ok = QInputDialog.getInt(
+            self, "Find ORFs",
+            "Minimum ORF length (amino acids, not counting the stop codon):",
+            int(self.settings.value("orf_min_aa", st.DEFAULT_MIN_ORF_AA)), 10, 100_000,
+        )
+        if not ok:
+            return
+        self.settings.setValue("orf_min_aa", min_aa)
+
+        record = self.current_record
+        circular = st.is_circular(record)
+        self.start_task(
+            "orfs", f"Finding ORFs in {record.id}...",
+            st.find_orfs, self.current_sequence, min_aa=min_aa, circular=circular,
+            on_done=lambda orfs: self.show_orfs(record, orfs, min_aa),
+            on_fail=lambda message: QMessageBox.critical(
+                self, "Error", f"ORF search failed:\n{message}"
+            ),
+        )
+
+    def show_orfs(self, record, orfs, min_aa):
+        if self.stale(record, "ORF search"):
+            return
+        # don't repeat ORFs that are already annotated with exactly the same location
+        annotated = {
+            (tuple(sorted(st.feature_parts(f))), st.feature_strand(f))
+            for f in self.current_features
+        }
+        new = [o for o in orfs
+               if (tuple(sorted(st.feature_parts(o))), st.feature_strand(o)) not in annotated]
+        for number, orf in enumerate(new, 1):
+            orf.qualifiers["label"] = [f"ORF{number} ({orf.qualifiers['aa'][0]} aa)"]
+        hidden = len(orfs) - len(new)
+
+        self.current_orfs = new
+        self.refresh_features()
+        if new:
+            self.view_tabs.setCurrentIndex(0)
+            message = (f"Found {len(new)} new ORF(s) of at least {min_aa} aa. "
+                       "Right-click one to add it as a feature.")
+        else:
+            message = f"No new ORFs of at least {min_aa} aa found."
+        if hidden:
+            message += f" ({hidden} already annotated, not shown.)"
+        self.statusBar().showMessage(message, 8000)
+
+    def clear_orfs(self):
+        self.current_orfs = []
+        self.refresh_features()
+
     def copy_seq(self):
         if self.current_record is None:
             return
-        QApplication.clipboard().setText(self.current_sequence)
-        self.statusBar().showMessage("Sequence copied to clipboard", 3000)
+        self.copy_text(self.current_sequence, "Sequence copied to clipboard")
 
     def show_reverse_complement(self):
         if not self.require_dna("Reverse complement"):
             return
-        result = str(Seq(self.current_sequence).reverse_complement())
-        QApplication.clipboard().setText(result)
-        QMessageBox.information(self, "Reverse complement", "Reverse complement copied to clipboard.")
+        self.copy_text(st.reverse_complement(self.current_sequence),
+                       "Reverse complement copied to clipboard")
 
     def show_translation(self):
         if not self.require_dna("Translation"):
             return
-        clean = self.current_sequence.replace("-", "").replace("U", "T")
-        usable_length = len(clean) - (len(clean) % 3)
-        if usable_length == 0:
-            QMessageBox.warning(self, "Too short", "The sequence is too short to translate.")
-            return
-
-        protein = str(Seq(clean[:usable_length]).translate())
-        QApplication.clipboard().setText(protein)
-        preview = protein[:500] + ("\n..." if len(protein) > 500 else "")
-        QMessageBox.information(
-            self, "Translation", f"Protein translation copied to clipboard.\n\n{preview}"
-        )
+        self.show_protein(self.current_sequence,
+                          f"{self.current_record.id}, whole sequence, frame +1")
 
     def show_about(self):
         QMessageBox.about(

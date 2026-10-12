@@ -6,7 +6,7 @@ All view functions:
 """
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -98,6 +98,22 @@ class SequenceViewer(QTextEdit):
         if parts:
             self._move_to(parts[0][0])
 
+    def select_range(self, start, end):
+        """Select start..end (0-based, end exclusive) and scroll to it."""
+        last = max(0, self.document().characterCount() - 1)
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(min(max(start, 0), last))
+        cursor.setPosition(min(max(end, 0), last), QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+        self.ensureCursorVisible()
+
+    def selected_range(self):
+        """(start, end) of the current selection, or None."""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return cursor.selectionStart(), cursor.selectionEnd()
+        return None
+
     def _emit_selection(self):
         # the text is the bare sequence (no newlines), so document positions
         # are exactly sequence positions
@@ -136,7 +152,8 @@ def nice_interval(length, target=10):
 
 
 class CircularDNAViewer(QWidget):
-    featureClicked = Signal(int)  # index into the features list
+    featureClicked = Signal(int)             # index into the features list
+    featureContextMenu = Signal(int, QPoint)  # index, global position for the menu
 
     def __init__(self):
         super().__init__()
@@ -159,6 +176,13 @@ class CircularDNAViewer(QWidget):
         self.sites = {}
         self.selected = -1
         self.highlight = None
+        self._lanes = self._assign_lanes()
+        self.update()
+
+    def set_features(self, features):
+        """Replace the features (after an edit) but keep sites and highlight."""
+        self.features = list(features or [])
+        self.selected = -1
         self._lanes = self._assign_lanes()
         self.update()
 
@@ -315,7 +339,8 @@ class CircularDNAViewer(QWidget):
 
     def _draw_feature(self, painter, index, feature, r):
         color = QColor(feature_color(feature))
-        width = FEATURE_WIDTH + (4 if index == self.selected else 0)
+        base = FEATURE_WIDTH - 3 if feature.type == "ORF" else FEATURE_WIDTH
+        width = base + (4 if index == self.selected else 0)
         pen = QPen(color, width)
         pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         painter.setPen(pen)
@@ -399,15 +424,28 @@ class CircularDNAViewer(QWidget):
                          Qt.AlignmentFlag.AlignCenter, f"{self.length:,} bp")
 
     # ---------------------------------------------------------- clicking
+    def feature_at(self, point):
+        """Index of the feature drawn under a widget point, or -1."""
+        if self.length <= 0:
+            return -1
+        dx, dy = point.x() - self._cx, point.y() - self._cy
+        dist = math.hypot(dx, dy)
+        theta = math.atan2(dy, dx)
+        pos = ((theta + math.pi / 2) % (2 * math.pi)) / (2 * math.pi) * self.length
+        for index, r, parts in self._hit_regions:
+            if abs(dist - r) <= FEATURE_WIDTH / 2 + 3 and any(s <= pos <= e for s, e in parts):
+                return index
+        return -1
+
     def mousePressEvent(self, event):
-        if self.length > 0:
-            p = event.position()
-            dx, dy = p.x() - self._cx, p.y() - self._cy
-            dist = math.hypot(dx, dy)
-            theta = math.atan2(dy, dx)
-            pos = ((theta + math.pi / 2) % (2 * math.pi)) / (2 * math.pi) * self.length
-            for index, r, parts in self._hit_regions:
-                if abs(dist - r) <= FEATURE_WIDTH / 2 + 3 and any(s <= pos <= e for s, e in parts):
-                    self.featureClicked.emit(index)
-                    return
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.feature_at(event.position())
+            if index >= 0:
+                self.featureClicked.emit(index)
+                return
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        index = self.feature_at(QPointF(event.pos()))
+        if index >= 0:
+            self.featureContextMenu.emit(index, event.globalPos())
