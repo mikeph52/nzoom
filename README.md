@@ -16,11 +16,14 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 - **Open FASTA and GenBank files**, including files that hold several records
 - **Circular plasmid maps** with colored, strand-aware feature arcs and auto-placed labels; click an arc to select that feature
 - **Feature table** that is sortable and linked to both the map and the sequence view
-- **Colored sequence view** for DNA and protein
+- **Add, edit and delete features**, including features that cross the origin of a circular plasmid
+- **ORF finder** that searches all six reading frames; turn any ORF into a CDS feature with one click
+- **Right-click menus** to copy, reverse-complement or translate any selection or feature
+- **Colored sequence view** for DNA and protein, with a live position, length and GC% readout for the selection
 - **Restriction site analysis** over all commercially available enzymes, with unique cutters marked on the map
 - **Fetch sequences from NCBI** by accession number
-- **Translate DNA, reverse complement, and GC content and composition stats**
-- **Save as GenBank or FASTA**
+- **Translation** that respects strand, `/codon_start` and `/transl_table`, plus reverse complement, GC content and composition stats
+- **Save as GenBank or FASTA**, with a warning before you lose unsaved changes
 
 ## Requirements
 
@@ -55,7 +58,8 @@ python main.py
 Then try one of these:
 
 - **File → Open…** and pick any `.gb` or `.fasta` file.
-- Click **Fetch from NCBI** and enter `L09137` to load the pUC19 plasmid. Then click **Find restriction sites**.
+- Open `examples/pDEMO.gb`, then try **Find restriction sites** and **Find ORFs**, and right-click any feature.
+- Click **Fetch from NCBI** and enter `L09137` to load the real pUC19 plasmid.
 
 ## Documentation
 
