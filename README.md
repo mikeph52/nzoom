@@ -5,7 +5,7 @@
 N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FASTA or GenBank file, or pull a sequence straight from NCBI. You can then explore it on an annotated circular map.
 
 > [!IMPORTANT]
-> Early alpha (v0.7.5). A first stable release is planned for 2027.
+> Early alpha (v0.10.1). A first stable release is planned for 2027.
 
 ![](docs/gui.png)
 
@@ -14,16 +14,19 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 ## Features
 
 - **Open FASTA and GenBank files**, including files that hold several records
-- **Circular plasmid maps** with colored, strand-aware feature arcs and auto-placed labels; click an arc to select that feature
+- **Circular and linear maps** with colored, strand-aware features and auto-placed labels; the style follows the sequence's topology, or pick one yourself
 - **Feature table** that is sortable and linked to both the map and the sequence view
 - **Add, edit and delete features**, including features that cross the origin of a circular plasmid
 - **ORF finder** that searches all six reading frames; turn any ORF into a CDS feature with one click
 - **Right-click menus** to copy, reverse-complement or translate any selection or feature
 - **Colored sequence view** for DNA and protein, with a live position, length and GC% readout for the selection
 - **Restriction site analysis** over all commercially available enzymes, with unique cutters marked on the map
+- **Virtual digest** with single and multiple enzymes, a simulated agarose gel with ladders, fragment tables, and PNG export
+- **Primer search**: paste a primer to see where its 3′ end binds on either strand, with Tm, and add it to the map
 - **Fetch sequences from NCBI** by accession number
 - **Translation** that respects strand, `/codon_start` and `/transl_table`, plus reverse complement, GC content and composition stats
 - **Save as GenBank or FASTA**, with a warning before you lose unsaved changes
+- **Light and dark mode**, following your system setting or chosen by hand
 
 ## Requirements
 

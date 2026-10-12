@@ -1,6 +1,5 @@
 # N-Zoom seqtools.py by mikeph52, Init 11/10/2026
 # Here there's all the seq features of nzoom.
-
 """
 seqtools.py — sequence logic for N-Zoom (no GUI code in here).
 
@@ -349,6 +348,143 @@ def find_orfs(sequence, min_aa=DEFAULT_MIN_ORF_AA, circular=False, table=1):
     for number, orf in enumerate(orfs, 1):
         orf.qualifiers["label"] = [f"ORF{number} ({orf.qualifiers['aa'][0]} aa)"]
     return orfs
+
+
+# ---------------------------------------------------------------- primers
+PRIMER_MIN_ANNEAL = 15       # 3' bases that must match for a binding site
+PRIMER_NA_MM = 50            # Tm conditions: monovalent salt (mM)
+PRIMER_CONC_NM = 250         # Tm conditions: primer concentration (nM)
+
+
+def clean_primer(primer):
+    """Uppercase, no spaces, U -> T. Raises ValueError for anything but A/C/G/T."""
+    cleaned = normalize_seq(primer).replace("U", "T")
+    if not cleaned:
+        raise ValueError("The primer is empty.")
+    bad = sorted(set(cleaned) - set("ACGT"))
+    if bad:
+        raise ValueError(f"Primers may only contain A, C, G and T (found: {', '.join(bad)}).")
+    return cleaned
+
+
+def primer_tm(primer):
+    """Melting temperature (deg C) by the nearest-neighbour method
+    (Biopython Tm_NN, 50 mM Na+, 250 nM primer)."""
+    from Bio.SeqUtils import MeltingTemp
+
+    return MeltingTemp.Tm_NN(primer, Na=PRIMER_NA_MM, dnac1=PRIMER_CONC_NM, dnac2=0)
+
+
+def find_primer_sites(sequence, primer, circular=False, min_anneal=PRIMER_MIN_ANNEAL):
+    """Where a primer binds, on either strand.
+
+    A site needs at least `min_anneal` bases at the primer's 3' end (or the
+    whole primer, if shorter) to match the template exactly. The match is then
+    extended toward the 5' end as far as bases keep matching; anything beyond
+    that is a 5' tail (e.g. an added restriction site).
+
+    Returns a list of dicts, sorted by position:
+      strand     1 = primer reads along the top strand (forward primer), -1 = reverse
+      start, end 1-based, inclusive, top-strand coordinates of the annealed part
+                 (start > end if it crosses the origin of a circular sequence)
+      anneal     number of annealed bases;  tail = primer length - anneal
+      location   Biopython location of the annealed part
+    """
+    primer = clean_primer(primer)
+    template = normalize_seq(sequence).replace("U", "T")
+    length, plen = len(template), len(primer)
+    seed_len = min(min_anneal, plen)
+    seed = primer[-seed_len:]
+    if seed_len > length:
+        return []
+
+    sites = []
+    for strand, strand_seq in ((1, template), (-1, reverse_complement(template))):
+        # the primer's own sequence appears in the strand it reads along
+        searchable = strand_seq + strand_seq[:plen - 1] if circular else strand_seq
+        i = searchable.find(seed)
+        while i != -1 and i < length:
+            end = i + seed_len  # exclusive, in this strand's coordinates
+            anneal = seed_len
+            while anneal < plen:
+                j = end - anneal - 1
+                if j < 0 and not circular:
+                    break
+                if strand_seq[j % length] != primer[plen - anneal - 1]:
+                    break
+                anneal += 1
+                if anneal >= length:
+                    break
+            a, b = end - anneal, end  # annealed part in this strand's coordinates
+            if strand == -1:          # convert to top-strand coordinates
+                a, b = length - b, length - a
+            start1 = a % length + 1
+            end1 = (b - 1) % length + 1
+            sites.append({
+                "strand": strand, "start": start1, "end": end1,
+                "anneal": anneal, "tail": plen - anneal,
+                "location": make_location(start1, end1, strand, length, circular),
+            })
+            i = searchable.find(seed, i + 1)
+    sites.sort(key=lambda site: (site["start"], -site["strand"]))
+    return sites
+
+
+# ---------------------------------------------------------------- digests
+# Band sizes (bp) of two common, generic DNA ladders
+LADDERS = {
+    "1 kb ladder": [10000, 8000, 6000, 5000, 4000, 3500, 3000, 2500, 2000,
+                    1500, 1000, 750, 500, 250],
+    "100 bp ladder": [1500, 1200, 1000, 900, 800, 700, 600, 500, 400, 300, 200, 100],
+}
+
+
+def digest(sequence, enzymes, circular=False):
+    """Cut a sequence with one or more enzymes.
+
+    Returns (cuts, fragments):
+      cuts       sorted list of (position, "Enzyme[/Enzyme]"), 1-based position
+                 of the first base after the cut on the top strand
+      fragments  list of dicts in sequence order: start, end (1-based,
+                 inclusive; start > end if the fragment crosses the origin),
+                 length, left and right (enzyme at each end, None for a
+                 sequence end), uncut (True only for an uncut circle)
+
+    Fragment sizes are top-strand lengths; sticky-end overhangs are ignored.
+    """
+    from Bio.Restriction import RestrictionBatch
+
+    clean = normalize_seq(sequence).replace("-", "").replace("U", "T")
+    length = len(clean)
+    names = sorted(set(enzymes))
+    by_position = {}
+    if names:
+        results = RestrictionBatch(names).search(Seq(clean), linear=not circular)
+        for enzyme, positions in results.items():
+            for pos in positions:
+                pos = (pos - 1) % length + 1  # keep positions within 1..length
+                by_position.setdefault(pos, []).append(str(enzyme))
+    cuts = [(pos, "/".join(sorted(found))) for pos, found in sorted(by_position.items())]
+    if not circular:
+        cuts = [(p, e) for p, e in cuts if 1 < p <= length]  # a cut before base 1 does nothing
+
+    fragments = []
+    if circular:
+        if not cuts:
+            return cuts, [{"start": 1, "end": length, "length": length,
+                           "left": None, "right": None, "uncut": True}]
+        for k, (pos, enzyme) in enumerate(cuts):
+            next_pos, next_enzyme = cuts[(k + 1) % len(cuts)]
+            size = (next_pos - pos) % length or length
+            fragments.append({"start": pos, "end": (next_pos - 2) % length + 1, "length": size,
+                              "left": enzyme, "right": next_enzyme, "uncut": False})
+    else:
+        bounds = [(1, None)] + cuts + [(length + 1, None)]
+        for (pos, enzyme), (next_pos, next_enzyme) in zip(bounds, bounds[1:]):
+            if next_pos > pos:
+                fragments.append({"start": pos, "end": next_pos - 1, "length": next_pos - pos,
+                                  "left": enzyme, "right": next_enzyme, "uncut": False})
+    return cuts, fragments
 
 
 # ---------------------------------------------------------------- restriction
