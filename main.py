@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -34,11 +35,17 @@ from PySide6.QtWidgets import (
 )
 
 from core import seqtools as st
+from core import theme
 from core.dialogs import FeatureDialog, RestrictionSitesDialog, TextResultDialog, number_item
-from core.viewers import CircularDNAViewer, SequenceViewer
+from core.digest import DigestDialog
+from core.maps import CircularDNAViewer, LinearDNAViewer, MapGroup
+from core.primers import PrimerDialog
+from core.viewers import SequenceViewer
 from core.workers import Task
 
-VERSION = "0.9.1"
+VERSION = "0.10.1"
+MAP_MODES = [("auto", "Automatic (from topology)"), ("circular", "Circular"), ("linear", "Linear")]
+THEME_NAMES = {"system": "Same as system", "light": "Light", "dark": "Dark"}
 
 OPEN_FILTER = (
     "Sequence files (*.gb *.gbk *.genbank *.gbff *.fasta *.fa *.faa *.fna *.fas);;"
@@ -74,6 +81,19 @@ class MainWindow(QMainWindow):
         self.pool = QThreadPool(self)
         self.tasks = {}              # kind -> running Task, e.g. {"ncbi": task}
         self.sites_dialog = None
+        self.sites_cache = (None, None)  # (record, all enzyme sites) for the digest tool
+
+        # appearance
+        self.theme_mode = self.settings.value("theme", "system")
+        if self.theme_mode not in theme.THEME_MODES:
+            self.theme_mode = "system"
+        self.map_mode = self.settings.value("map_mode", "auto")
+        if self.map_mode not in dict(MAP_MODES):
+            self.map_mode = "auto"
+        theme.apply_theme(QApplication.instance(), self.theme_mode)
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):  # follow the system while in "system" mode
+            hints.colorSchemeChanged.connect(self.on_system_color_scheme)
 
         self.build_ui()
         self.build_menu()
@@ -93,16 +113,36 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Edit selected feature...", self.edit_selected_feature)
         self.add_action(edit_menu, "Delete selected feature", self.delete_selected_feature)
 
+        view_menu = self.menuBar().addMenu("View")
+        map_menu = view_menu.addMenu("Map style")
+        self.map_mode_group = QActionGroup(self)
+        for mode, text in MAP_MODES:
+            action = self.add_action(map_menu, text, lambda _=False, m=mode: self.set_map_mode(m))
+            action.setCheckable(True)
+            action.setChecked(mode == self.map_mode)
+            self.map_mode_group.addAction(action)
+        theme_menu = view_menu.addMenu("Theme")
+        self.theme_group = QActionGroup(self)
+        for mode in theme.THEME_MODES:
+            action = self.add_action(theme_menu, THEME_NAMES[mode],
+                                     lambda _=False, m=mode: self.set_theme_mode(m))
+            action.setCheckable(True)
+            action.setChecked(mode == self.theme_mode)
+            self.theme_group.addAction(action)
+
         tools_menu = self.menuBar().addMenu("Tools")
         self.ncbi_action = self.add_action(tools_menu, "Fetch from NCBI...", self.fetch_from_ncbi)
         tools_menu.addSeparator()
         self.add_action(tools_menu, "Translate whole sequence", self.show_translation)
         tools_menu.addSeparator()
         self.rs_action = self.add_action(tools_menu, "Find restriction sites", self.find_restriction_sites)
-        self.add_action(tools_menu, "Clear restriction sites", lambda: self.circular_viewer.set_sites({}))
+        self.add_action(tools_menu, "Clear restriction sites", lambda: self.maps.set_sites({}))
+        self.digest_action = self.add_action(tools_menu, "Virtual digest...", self.open_digest, "Ctrl+D")
         tools_menu.addSeparator()
         self.orf_action = self.add_action(tools_menu, "Find ORFs...", self.find_orfs)
         self.add_action(tools_menu, "Clear ORFs", self.clear_orfs)
+        tools_menu.addSeparator()
+        self.add_action(tools_menu, "Find primer...", self.open_primer_dialog, "Ctrl+P")
 
         about_menu = self.menuBar().addMenu("About")
         self.add_action(about_menu, "About", self.show_about)
@@ -153,10 +193,16 @@ class MainWindow(QMainWindow):
         center_split = QSplitter(Qt.Orientation.Vertical)
 
         self.view_tabs = QTabWidget()
+        # both map styles are kept up to date; the stack shows one of them
         self.circular_viewer = CircularDNAViewer()
-        self.circular_viewer.featureClicked.connect(self.select_feature_row)
-        self.circular_viewer.featureContextMenu.connect(self.map_context_menu)
-        self.view_tabs.addTab(self.circular_viewer, "Map")
+        self.linear_viewer = LinearDNAViewer()
+        self.maps = MapGroup(self.circular_viewer, self.linear_viewer)
+        self.map_stack = QStackedWidget()
+        for view in (self.circular_viewer, self.linear_viewer):
+            view.featureClicked.connect(self.select_feature_row)
+            view.featureContextMenu.connect(self.map_context_menu)
+            self.map_stack.addWidget(view)
+        self.view_tabs.addTab(self.map_stack, "Map")
         self.viewer = SequenceViewer()
         self.viewer.selectionInfo.connect(self.on_sequence_selection)
         self.viewer.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -172,6 +218,8 @@ class MainWindow(QMainWindow):
         self.feature_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.feature_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.feature_table.verticalHeader().setVisible(False)
+        # start sorted by position (Qt would default to descending by the first column)
+        self.feature_table.horizontalHeader().setSortIndicator(2, Qt.SortOrder.AscendingOrder)
         self.feature_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.feature_table.itemSelectionChanged.connect(self.on_feature_selected)
         self.feature_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -222,7 +270,9 @@ class MainWindow(QMainWindow):
         add_button("Reverse complement", self.show_reverse_complement)
         add_button("Translate DNA", self.show_translation)
         self.rs_button = add_button("Find restriction sites", self.find_restriction_sites)
+        self.digest_button = add_button("Virtual digest", self.open_digest)
         self.orf_button = add_button("Find ORFs", self.find_orfs)
+        add_button("Find primer", self.open_primer_dialog)
         add_button("Add feature", self.add_feature)
         right_layout.addWidget(actions_box)
         right_layout.addStretch()
@@ -425,13 +475,14 @@ class MainWindow(QMainWindow):
 
         # map only makes sense for DNA
         if seq_type == "DNA":
-            self.circular_viewer.set_record(len(sequence), record.id, self.items)
+            self.maps.set_record(len(sequence), record.id, self.items)
             self.view_tabs.setTabEnabled(0, True)
         else:
-            self.circular_viewer.clear_seq()
+            self.maps.clear_seq()
             self.view_tabs.setTabEnabled(0, False)
             self.view_tabs.setCurrentIndex(1)
 
+        self.update_map_style()
         self.fill_feature_table()
 
         # info panel
@@ -462,8 +513,8 @@ class MainWindow(QMainWindow):
             return
         self.current_features = st.display_features(self.current_record)
         self.items = self.current_features + self.current_orfs
-        if self.circular_viewer.length:
-            self.circular_viewer.set_features(self.items)
+        if self.maps.length:
+            self.maps.set_features(self.items)
         self.fill_feature_table()
         self.update_feature_count()
         if select is not None:
@@ -519,12 +570,12 @@ class MainWindow(QMainWindow):
     def on_feature_selected(self):
         index = self.selected_item_index()
         if index < 0:
-            self.viewer.setExtraSelections([])
-            self.circular_viewer.set_selected(-1)
+            self.viewer.clear_highlight()
+            self.maps.set_selected(-1)
             return
         feature = self.items[index]
         self.viewer.highlight_parts(st.feature_parts(feature))
-        self.circular_viewer.set_selected(index)
+        self.maps.set_selected(index)
         self.statusBar().showMessage(
             f"{feature.type}: {st.feature_label(feature)}  ({feature.location})", 8000
         )
@@ -542,7 +593,7 @@ class MainWindow(QMainWindow):
         sequence = self.current_sequence
         if not sequence:
             self.position_label.setText("")
-            self.circular_viewer.set_highlight()
+            self.maps.set_highlight()
             return
 
         is_dna = st.detect_seq_type(sequence) == "DNA"
@@ -550,13 +601,13 @@ class MainWindow(QMainWindow):
         if start == end:
             position = min(start + 1, len(sequence))
             self.position_label.setText(f"Position {position:,} of {len(sequence):,}")
-            self.circular_viewer.set_highlight()
+            self.maps.set_highlight()
             return
 
         text = f"Selected {start + 1:,}–{end:,}  ({end - start:,} {unit})"
         if is_dna:
             text += f"  ·  GC {st.gc_percent(sequence[start:end]):.1f}%"
-            self.circular_viewer.set_highlight(start, end)
+            self.maps.set_highlight(start, end)
         self.position_label.setText(text)
 
     # ================================================================ right-click menus
@@ -807,6 +858,7 @@ class MainWindow(QMainWindow):
             ("ncbi", (self.ncbi_action, self.ncbi_button)),
             ("restriction", (self.rs_action, self.rs_button)),
             ("orfs", (self.orf_action, self.orf_button)),
+            ("digest", (self.digest_action, self.digest_button)),
         ):
             for widget in widgets:
                 widget.setEnabled(kind not in self.tasks)
@@ -867,8 +919,10 @@ class MainWindow(QMainWindow):
     def show_restriction_results(self, record, circular, sites):
         if self.stale(record, "Restriction search"):
             return
+        if circular == st.is_circular(record):
+            self.sites_cache = (record, sites)
         on_map = st.map_sites(sites)
-        self.circular_viewer.set_sites(on_map)
+        self.maps.set_sites(on_map)
         self.view_tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
             f"{len(sites)} enzymes cut; {len(on_map)} unique 6+ bp sites shown on map", 8000
@@ -935,6 +989,78 @@ class MainWindow(QMainWindow):
     def clear_orfs(self):
         self.current_orfs = []
         self.refresh_features()
+
+    # ================================================================ primers
+    def open_primer_dialog(self):
+        if not self.require_dna("Primer search"):
+            return
+        PrimerDialog(self, self.current_sequence, st.is_circular(self.current_record),
+                     on_add=self.add_primer_features).exec()
+
+    def add_primer_features(self, features):
+        self.current_record.features.extend(features)
+        count = len(features)
+        self.after_feature_change(
+            features[0], f"Added {count} primer site{'s' if count != 1 else ''} "
+                         f"\u201c{st.feature_label(features[0])}\u201d")
+
+    # ================================================================ digest
+    def open_digest(self):
+        if not self.require_dna("The virtual digest"):
+            return
+        record = self.current_record
+        circular = st.is_circular(record)
+        cached_record, cached_sites = self.sites_cache
+        if cached_record is record:
+            self.show_digest(record, circular, cached_sites)
+            return
+        # the enzyme list needs every site in the sequence: find them first
+        self.start_task(
+            "digest", f"Preparing the digest for {record.id}...",
+            st.find_restriction_sites, self.current_sequence, circular=circular,
+            on_done=lambda sites: self.show_digest(record, circular, sites),
+            on_fail=lambda message: QMessageBox.critical(
+                self, "Error", f"Restriction analysis failed:\n{message}"
+            ),
+        )
+
+    def show_digest(self, record, circular, sites):
+        if self.stale(record, "Preparing the digest"):
+            return
+        self.sites_cache = (record, sites)
+        DigestDialog(self, record.id, self.current_sequence, circular, sites).exec()
+
+    # ================================================================ appearance
+    def update_map_style(self):
+        """Show the circular or linear map, following the user's choice or the topology."""
+        record = self.current_record
+        if self.map_mode == "circular":
+            circular = True
+        elif self.map_mode == "linear":
+            circular = False
+        else:
+            circular = record is None or st.is_circular(record)
+        self.map_stack.setCurrentWidget(self.circular_viewer if circular else self.linear_viewer)
+
+    def set_map_mode(self, mode):
+        self.map_mode = mode
+        self.settings.setValue("map_mode", mode)
+        self.update_map_style()
+
+    def set_theme_mode(self, mode):
+        self.theme_mode = mode
+        self.settings.setValue("theme", mode)
+        self.apply_theme()
+
+    def on_system_color_scheme(self, *_):
+        if self.theme_mode == "system":
+            self.apply_theme()
+
+    def apply_theme(self):
+        theme.apply_theme(QApplication.instance(), self.theme_mode)
+        self.viewer.refresh_theme()
+        self.maps.update()
+        self.fill_feature_table()
 
     def copy_seq(self):
         if self.current_record is None:

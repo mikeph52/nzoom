@@ -1,8 +1,8 @@
 # N-Zoom User Manual
 
-**Version 0.9.1** · by mikeph52
+**Version 0.10.1** · by mikeph52
 
-N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. You can add and edit your own features, find open reading frames and restriction sites, translate any region, and download sequences straight from NCBI.
+N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. You can add and edit your own features, find open reading frames, restriction sites and primer binding sites, run virtual digests on a simulated gel, translate any region, and download sequences straight from NCBI. It has light and dark modes.
 
 ---
 
@@ -22,12 +22,15 @@ N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It 
 12. [Translation, reverse complement and copying](#12-translation-reverse-complement-and-copying)
 13. [Finding open reading frames (ORFs)](#13-finding-open-reading-frames-orfs)
 14. [Adding, editing and deleting features](#14-adding-editing-and-deleting-features)
-15. [Saving and exporting](#15-saving-and-exporting)
-16. [Keyboard shortcuts](#16-keyboard-shortcuts)
-17. [Color reference](#17-color-reference)
-18. [File format notes](#18-file-format-notes)
-19. [Known limitations](#19-known-limitations)
-20. [Troubleshooting](#20-troubleshooting)
+15. [Finding primers](#15-finding-primers)
+16. [Virtual digest and gel](#16-virtual-digest-and-gel)
+17. [Light and dark mode](#17-light-and-dark-mode)
+18. [Saving and exporting](#18-saving-and-exporting)
+19. [Keyboard shortcuts](#19-keyboard-shortcuts)
+20. [Color reference](#20-color-reference)
+21. [File format notes](#21-file-format-notes)
+22. [Known limitations](#22-known-limitations)
+23. [Troubleshooting](#23-troubleshooting)
 
 ---
 
@@ -55,13 +58,18 @@ N-Zoom/
 ├── core/
 │   ├── __init__.py
 │   ├── dialogs.py
+│   ├── digest.py
+│   ├── maps.py
+│   ├── primers.py
 │   ├── seqtools.py
+│   ├── theme.py
 │   ├── viewers.py
 │   └── workers.py
 ├── docs/
 │   └── documentation.md
-└── examples/
-    └── pDEMO.gb
+├── examples/
+│   └── pDEMO.gb
+└── tests/
 ```
 
 `examples/pDEMO.gb` is a 4,000 bp demo plasmid for trying every tool. It has annotated features, two genes that translate cleanly (GFP and AmpR), and a multiple cloning site whose ten enzymes each cut only once. The genes are made of random codons, so they have the right size and shape but aren't real proteins.
@@ -82,7 +90,7 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ File  Edit  Tools  About                                             │
+│ File  Edit  View  Tools  About                                       │
 │ [Open] [Fetch from NCBI]  path/to/current/file.gb                    │
 ├────────────┬──────────────────────────────────────┬──────────────────┤
 │            │  Sequence title                      │ Sequence         │
@@ -93,7 +101,9 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 │            │  │ Feature table  │                  │  Reverse compl.  │
 │            │  └────────────────┘                  │  Translate DNA   │
 │            │                                      │  Find restr. ... │
+│            │                                      │  Virtual digest  │
 │            │                                      │  Find ORFs       │
+│            │                                      │  Find primer     │
 │            │                                      │  Add feature     │
 ├────────────┴──────────────────────────────────────┴──────────────────┤
 │ Status bar                                                           │
@@ -103,7 +113,7 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 | Area | Purpose |
 |---|---|
 | **Record list** (left) | Every sequence currently loaded. Click one to display it. |
-| **Viewer tabs** (centre) | **Map** shows the plasmid map; **Sequence** shows the bases or amino acids. |
+| **Viewer tabs** (centre) | **Map** shows a circular or linear map; **Sequence** shows the bases or amino acids. |
 | **Feature table** (centre, bottom) | Every annotated feature of the current record, plus any ORFs found. |
 | **Information panel** (right) | Type, length, topology, GC content, feature count and composition. |
 | **Actions** (right) | One-click tools for the current record. |
@@ -166,30 +176,47 @@ Only nucleotide records (NCBI's *nuccore* database) can be fetched. Protein acce
 
 ## 6. The Map view
 
-The **Map** tab draws the current DNA record as a circle, with position 0 at the top and positions running clockwise.
+The **Map** tab draws the current DNA record in one of two styles:
+
+- **Circular map**, for circular DNA such as plasmids: position 0 is at the top and positions run clockwise.
+- **Linear map**, for linear DNA such as PCR products, genes and FASTA sequences: a horizontal bar running from base 1 on the left to the last base on the right.
+
+### Choosing the map style
+
+By default N-Zoom picks the style from the record's [topology](#21-file-format-notes): circular records get the circular map, and linear, FASTA and unknown records get the linear map. To override this, use **View → Map style**:
+
+| Option | Shows |
+|---|---|
+| **Automatic (from topology)** | Circular map for circular records, linear map for everything else (default) |
+| **Circular** | Always the circular map |
+| **Linear** | Always the linear map. Useful for looking at a plasmid region by region. |
+
+The choice is remembered for next time. Changing the map style doesn't change the record: a circular plasmid shown as a line is still treated as circular by the ORF finder, the restriction search and so on.
 
 ### What's on the map
 
-| Element | Meaning |
-|---|---|
-| **Black circle** | The DNA backbone |
-| **Short grey ticks with numbers** | Position markers. The spacing (for example every 200, 500 or 1,000 bp) adapts to the sequence length. |
-| **Colored arcs outside the circle** | Features on the **forward** strand |
-| **Colored arcs inside the circle** | Features on the **reverse** strand |
-| **Arrowheads** | Show which way a feature reads (its 3′ end) |
-| **Labels with grey leader lines** | Feature names, connected to the arc they belong to |
-| **Thin light-green arcs** | ORFs, after you run the [ORF finder](#13-finding-open-reading-frames-orfs) |
-| **Red ticks and red labels** | Restriction sites, after you run a restriction search |
-| **Yellow band on the circle** | The region selected in the Sequence view |
-| **Centre text** | Record name and length in bp |
+| Element | Circular map | Linear map |
+|---|---|---|
+| **The DNA** | Dark circle (backbone) | Horizontal bar with a short end mark at each end |
+| **Position markers** | Ticks with numbers inside the circle | Ticks with numbers below the bar |
+| **Forward-strand features** | Colored arcs outside the circle | Colored bars above the line |
+| **Reverse-strand features** | Colored arcs inside the circle | Colored bars below the line |
+| **Direction** | Arrowheads at each feature's 3′ end | Pointed end at each feature's 3′ end |
+| **Labels** | Around the outside, with grey leader lines | Above (forward features, enzymes) and below (reverse features), with leader lines |
+| **ORFs** | Thin light-green arcs | Thin light-green bars |
+| **Restriction sites** | Red ticks and red labels | Red ticks across the bar, red labels above |
+| **Selected region** | Yellow band on the circle | Yellow band over the bar |
+| **Name and length** | In the centre | Top left |
+
+The tick spacing (for example every 200, 500 or 1,000 bp) adapts to the sequence length. The linear map fits the whole sequence into the window's width; there's no zoom yet.
 
 ### Overlapping features
 
-Features that overlap are stacked on separate rings, so they don't cover each other. Each strand can have up to four rings. Beyond that, extra features share the outermost ring.
+Features that overlap are stacked on separate rings (circular) or rows (linear), so they don't cover each other. Each strand can have up to four. Beyond that, extra features share the outermost one.
 
 ### Features that cross the origin
 
-On circular plasmids, a feature can start near the end of the sequence and continue past position 0. These are drawn as one continuous arc through the top of the map.
+On circular plasmids, a feature can start near the end of the sequence and continue past position 0. The circular map draws it as one continuous arc through the top. The linear map draws it as two pieces, one at each end of the bar.
 
 ### Labels
 
@@ -199,13 +226,13 @@ On very busy maps (more than 300 labels in total), labels are switched off compl
 
 ### Selecting a feature on the map
 
-**Click an arc** to select that feature. Its row is selected in the feature table, it's highlighted in the Sequence view, and its arc is drawn thicker.
+**Click a feature** (an arc or a bar) to select it. Its row is selected in the feature table, it's highlighted in the Sequence view, and it's drawn thicker (circular) or outlined (linear).
 
-**Right-click an arc** for that feature's [menu](#11-right-click-menus): translate it, copy it, edit it, and so on.
+**Right-click a feature** for its [menu](#11-right-click-menus): translate it, copy it, edit it, and so on.
 
 ### When the map is unavailable
 
-The Map tab is disabled for protein and "Unknown" sequences. Linear DNA and FASTA records are still drawn as a circle. The Topology field in the [information panel](#9-sequence-information-panel) tells you whether the molecule is really circular.
+The Map tab is disabled for protein and "Unknown" sequences.
 
 The **source** feature, which spans the whole sequence in every GenBank file, is not drawn on the map.
 
@@ -215,7 +242,7 @@ The **source** feature, which spans the whole sequence in every GenBank file, is
 
 The **Sequence** tab shows the full sequence as wrapping text in a monospace font.
 
-- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#17-color-reference)). Longer sequences are shown in plain black so they load quickly.
+- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#20-color-reference)). Longer sequences are shown in plain black so they load quickly.
 - **Feature highlighting:** when you select a feature, its region is highlighted in yellow and the view scrolls to it. Features with several parts, such as origin-crossing features or joined exons, highlight every part.
 - The view is **read-only**. You can select and copy text, but you can't edit it.
 
@@ -349,7 +376,7 @@ Right-clicking with nothing selected offers **Add feature…** and **Select all*
 
 ### On a feature or ORF
 
-Right-click a feature's arc on the map, or its row in the feature table. The first, greyed-out line of the menu shows which feature you clicked.
+Right-click a feature on the map (an arc or a bar), or its row in the feature table. The first, greyed-out line of the menu shows which feature you clicked.
 
 | Menu item | What it does |
 |---|---|
@@ -451,7 +478,7 @@ Use **Tools → Clear ORFs**. ORFs are also cleared when you select a different 
 
 ## 14. Adding, editing and deleting features
 
-All changes are made to the records in memory. Use [Save](#15-saving-and-exporting) to write them to a file.
+All changes are made to the records in memory. Use [Save](#18-saving-and-exporting) to write them to a file.
 
 ### Adding a feature
 
@@ -493,7 +520,114 @@ There's no undo yet. To throw away all changes since your last save, open the fi
 
 ---
 
-## 15. Saving and exporting
+## 15. Finding primers
+
+Use **Tools → Find primer…** (Ctrl+P) or the **Find primer** button (DNA only).
+
+1. Type a **name**, for example `GFP-fwd`.
+2. Paste the **primer sequence**, written 5′ → 3′ as you would order it. Spaces and line breaks are ignored, and lowercase is fine. Only A, C, G and T are allowed.
+3. Results appear as you type: the primer's length, GC content and Tm, and a table of every **binding site**.
+4. Select the sites you want and click **Add selected sites as features**. Each site is added as a `primer_bind` feature, with an arrow showing the primer's direction. Its note records the primer sequence and Tm.
+
+### How binding sites are found
+
+A primer binds where its **3′ end** matches the template exactly. The 3′ end is what the polymerase extends, so it must pair perfectly.
+
+- By default the last **15 bases** at the 3′ end must match (the **Must match** setting; you can change it from 8 to 60). Shorter primers must match completely.
+- From there, the match is extended toward the 5′ end for as long as bases keep matching. Bases beyond that are a **5′ tail**, such as an added restriction site or tag, which doesn't anneal in the first PCR cycle.
+- **Both strands** are searched. A **forward** (→) primer has the same sequence as the top strand; a **reverse** (←) primer matches the bottom strand.
+- On circular records, primers can bind across the origin.
+
+| Column | Meaning |
+|---|---|
+| **Strand** | → forward or ← reverse |
+| **Start / End** | The annealed part, 1-based, in top-strand numbering |
+| **Annealed** | Number of primer bases that pair with the template |
+| **5′ tail** | Primer bases that don't pair |
+| **Tm annealed** | Melting temperature of the annealed part only. This is the Tm that matters for the first PCR cycles. |
+
+If a primer binds **more than once**, N-Zoom warns you: PCR may give extra products.
+
+### About the Tm
+
+Tm is calculated with Biopython's nearest-neighbour method (`Tm_NN`), assuming **50 mM Na⁺** and **250 nM primer**, without Mg²⁺. Different calculators and buffers give values a few degrees apart, so use it to compare primers rather than as an exact annealing temperature. Your polymerase supplier's calculator is the best guide for the final value.
+
+### Limitations
+
+The search looks for exact 3′ matches only. Primers with a mismatch near the 3′ end, which may still bind weakly, aren't reported. There's no check for hairpins or primer dimers, and no primer design yet.
+
+---
+
+## 16. Virtual digest and gel
+
+Use **Tools → Virtual digest…** (Ctrl+D) or the **Virtual digest** button (DNA only). N-Zoom first finds every enzyme that cuts the sequence, which runs in the background, then opens the digest window. If you've just run **Find restriction sites** on the same record, it opens straight away.
+
+### Making a digest
+
+1. **Choose enzymes** in the list on the left. Each shows how many times it cuts, for example `EcoRI (1 cut)`.
+   - Type in **Filter enzymes** to find one by name.
+   - The drop-down limits the list to enzymes that cut once, 1–2 times, 1–3 times, or any number of times.
+2. **Check** one enzyme for a single digest, or several for a double or triple digest.
+3. Click **Add lane**. The digest appears as a new lane on the gel, and the checks are cleared, ready for the next lane.
+
+You can add up to 10 lanes. To remove one, select it in the **Lanes** list and click **Remove lane**.
+
+### The gel
+
+The gel shows a **ladder** (lane **L**) and one lane per digest, numbered as in the Lanes list. Choose the ladder with the **Ladder** drop-down:
+
+| Ladder | Bands (bp) |
+|---|---|
+| **1 kb ladder** | 10,000 · 8,000 · 6,000 · 5,000 · 4,000 · 3,500 · 3,000 · 2,500 · 2,000 · 1,500 · 1,000 · 750 · 500 · 250 |
+| **100 bp ladder** | 1,500 · 1,200 · 1,000 · 900 · 800 · 700 · 600 · 500 · 400 · 300 · 200 · 100 |
+
+These are generic ladders; commercial ones differ slightly.
+
+- **Band position:** small fragments run further down. Distance is proportional to the logarithm of the size, the usual approximation for agarose gels.
+- **Band brightness** follows the amount of DNA. With equal numbers of molecules, longer fragments carry more DNA, so they look brighter, as with ethidium or similar stains. Fragments of the same size add up into one brighter band.
+- Fragments of very similar size **merge** into one band, as they would on a real gel.
+
+**Click a lane** on the gel to select it. **Save gel image…** saves the gel as a PNG picture.
+
+### The fragment table
+
+For the selected lane, the table lists each fragment:
+
+| Column | Meaning |
+|---|---|
+| **#** | Fragment number, in sequence order |
+| **Size (bp)** | Fragment length |
+| **Start / End** | First and last base, 1-based. On circular DNA, a fragment that crosses the origin has Start larger than End. |
+| **Left end / Right end** | The enzyme that made each end, or "sequence start" / "sequence end" for the ends of linear DNA |
+
+### What the simulation assumes
+
+- **Sizes** are measured on the top strand; sticky-end overhangs of a few bases are ignored.
+- **Circular DNA** cut once gives a single linear fragment of full length. Uncut circular DNA is drawn at its full size and marked **uncut circle**. On a real gel, uncut plasmids run as several bands (supercoiled, nicked) at positions that don't match their size.
+- **Topology** follows the record: circular records are digested as circles, everything else as linear DNA.
+- Real gels also depend on agarose percentage, voltage and run time, and very small fragments may run off or be too faint to see.
+
+---
+
+## 17. Light and dark mode
+
+Choose **View → Theme**:
+
+| Option | What it does |
+|---|---|
+| **Same as system** | Follows your operating system's light or dark setting, and switches automatically when it changes (default) |
+| **Light** | Always light |
+| **Dark** | Always dark |
+
+The choice is remembered for next time. The whole window switches, including the maps and the sequence colors. Base and amino-acid colors use lighter shades in dark mode so they stay readable.
+
+The **gel** in the virtual digest always looks the same (light bands on a dark gel), as real gel photos do.
+
+N-Zoom uses the same widget style (Qt's "Fusion") on every platform, because some native styles ignore dark colors.
+
+---
+
+## 18. Saving and exporting
 
 | Command | What it does |
 |---|---|
@@ -522,7 +656,7 @@ If you save FASTA-loaded records as GenBank, N-Zoom also fills in the molecule t
 
 ---
 
-## 16. Keyboard shortcuts
+## 19. Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
@@ -530,6 +664,8 @@ If you save FASTA-loaded records as GenBank, N-Zoom also fills in the molecule t
 | **Ctrl+S** | Save |
 | **Ctrl+Shift+S** | Save As |
 | **Ctrl+E** | Add feature |
+| **Ctrl+D** | Virtual digest |
+| **Ctrl+P** | Find primer |
 | **Delete** | Delete the selected feature (when the feature table has focus) |
 | **Ctrl+Q** | Exit N-Zoom |
 | **Ctrl+A** | Select the whole sequence (in the Sequence view) |
@@ -540,7 +676,9 @@ On macOS, use **Cmd** instead of Ctrl.
 
 ---
 
-## 17. Color reference
+## 20. Color reference
+
+The colors below are the same in light and dark mode; dark mode uses lighter shades so they stay readable.
 
 ### DNA bases (Sequence view)
 
@@ -551,7 +689,7 @@ On macOS, use **Cmd** instead of Ctrl.
 | G | Amber |
 | C | Blue |
 | N | Grey |
-| Other ambiguity codes | Dark grey |
+| Other ambiguity codes | Dark grey (light grey in dark mode) |
 
 ### Amino acids (Sequence view)
 
@@ -576,7 +714,7 @@ On macOS, use **Cmd** instead of Ctrl.
 | `promoter` | Orange |
 | `terminator` | Red |
 | `rep_origin` | Yellow |
-| `primer_bind` | Teal |
+| `primer_bind` (including primers you add) | Teal |
 | `protein_bind` | Brown |
 | `RBS` | Purple |
 | `regulatory` | Deep orange |
@@ -588,7 +726,7 @@ Restriction sites are always dark red. The selected region is shaded yellow.
 
 ---
 
-## 18. File format notes
+## 21. File format notes
 
 ### How features look in a GenBank file
 
@@ -614,25 +752,27 @@ GenBank is a column-based format: the feature type starts at column 6, and the l
 
 ### Circular vs linear
 
-Topology is read from the `LOCUS` line of a GenBank file, for example `LOCUS pUC19 2686 bp DNA circular SYN`. FASTA files have no way to store topology, so FASTA records are treated as linear: features and ORFs can't cross the origin.
+Topology is read from the `LOCUS` line of a GenBank file, for example `LOCUS pUC19 2686 bp DNA circular SYN`. FASTA files have no way to store topology, so FASTA records are treated as linear: they're shown on the linear map, and features, ORFs, primers and digest fragments can't cross the origin.
 
 ---
 
-## 19. Known limitations
+## 22. Known limitations
 
-These apply to version 0.7.0:
+These apply to version 0.8.0:
 
 - **The sequence itself can't be edited.** Features can be added, edited and deleted, but bases can't be inserted, removed or changed.
 - **No undo** for feature changes. Discarding unsaved changes is the only way back.
-- **Background tasks can't be cancelled.** If you close N-Zoom during an NCBI download, restriction search or ORF search, it waits for the task to finish before closing.
-- **The map is always circular.** Linear molecules are also drawn as a circle; there's no linear map view yet.
+- **Background tasks can't be cancelled.** If you close N-Zoom while a download or search is running, it waits for the task to finish before closing.
+- **No zoom on the maps.** The whole sequence always fits the window, so dense regions of large sequences are hard to read on the map; use the Sequence view or the feature table.
+- **Primer search finds exact 3′ matches only.** There's no primer design, and no check for hairpins or primer dimers.
+- **The gel is an approximation.** Band positions use a simple log model, and uncut plasmids are not drawn the way they really run.
 - **The ORF finder only uses ATG** as a start codon, and the standard genetic code.
 - **Topology can't be changed.** A FASTA record can't be marked as circular.
 - **Very large sequences** (whole genomes) open and display, but the map becomes crowded and labels are hidden.
 
 ---
 
-## 20. Troubleshooting
+## 23. Troubleshooting
 
 | Problem | Solution |
 |---|---|
@@ -648,3 +788,7 @@ These apply to version 0.7.0:
 | OK is greyed out in the feature dialog | Start is after End on a linear record. Swap them, or see [Circular vs linear](#circular-vs-linear). |
 | A translation has many `*` in the middle | The coordinates, strand or `/codon_start` of the feature are probably wrong |
 | Sequence appears in black instead of colors | It's longer than 50,000 characters. This is intentional, to keep the app fast. |
+| A plasmid is shown as a straight line | The record isn't marked circular (for example, it came from a FASTA file), or **View → Map style** is set to Linear |
+| A primer you expect isn't found | Check it's written 5′ → 3′, and that its 3′ end matches the template exactly. Lower **Must match** to allow shorter annealing. |
+| The enzyme you want isn't in the digest list | It doesn't cut this sequence, or the drop-down hides enzymes that cut more often. Choose **All enzymes that cut**. |
+| Colors look wrong after switching theme | Choose the theme again in **View → Theme**; if that doesn't help, restart N-Zoom |
