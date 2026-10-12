@@ -1,3 +1,4 @@
 .vscode
 misc-trash
 __pycache__/
+.pytest_cache
