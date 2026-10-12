@@ -1,8 +1,8 @@
 # N-Zoom User Manual
 
-**Version 0.7.5** · by mikeph52
+**Version 0.9.1** · by mikeph52
 
-N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. It also finds restriction sites, translates DNA, and downloads sequences straight from NCBI.
+N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. You can add and edit your own features, find open reading frames and restriction sites, translate any region, and download sequences straight from NCBI.
 
 ---
 
@@ -18,19 +18,22 @@ N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It 
 8. [The feature table](#8-the-feature-table)
 9. [Sequence information panel](#9-sequence-information-panel)
 10. [Restriction site analysis](#10-restriction-site-analysis)
-11. [Translation, reverse complement and copying](#11-translation-reverse-complement-and-copying)
-12. [Saving and exporting](#12-saving-and-exporting)
-13. [Keyboard shortcuts](#13-keyboard-shortcuts)
-14. [Color reference](#14-color-reference)
-15. [File format notes](#15-file-format-notes)
-16. [Known limitations](#16-known-limitations)
-17. [Troubleshooting](#17-troubleshooting)
+11. [Right-click menus](#11-right-click-menus)
+12. [Translation, reverse complement and copying](#12-translation-reverse-complement-and-copying)
+13. [Finding open reading frames (ORFs)](#13-finding-open-reading-frames-orfs)
+14. [Adding, editing and deleting features](#14-adding-editing-and-deleting-features)
+15. [Saving and exporting](#15-saving-and-exporting)
+16. [Keyboard shortcuts](#16-keyboard-shortcuts)
+17. [Color reference](#17-color-reference)
+18. [File format notes](#18-file-format-notes)
+19. [Known limitations](#19-known-limitations)
+20. [Troubleshooting](#20-troubleshooting)
 
 ---
 
 ## 1. Installation
 
-N-Zoom needs **Python 3.9 or newer** and two libraries:
+N-Zoom needs **Python 3.10 or newer** and two libraries:
 
 | Library | What it's used for |
 |---|---|
@@ -49,11 +52,19 @@ The N-Zoom folder should look like this:
 N-Zoom/
 ├── main.py
 ├── requirements.txt
-└── core/
-    ├── __init__.py
-    ├── seqtools.py
-    └── viewers.py
+├── core/
+│   ├── __init__.py
+│   ├── dialogs.py
+│   ├── seqtools.py
+│   ├── viewers.py
+│   └── workers.py
+├── docs/
+│   └── documentation.md
+└── examples/
+    └── pDEMO.gb
 ```
+
+`examples/pDEMO.gb` is a 4,000 bp demo plasmid for trying every tool. It has annotated features, two genes that translate cleanly (GFP and AmpR), and a multiple cloning site whose ten enzymes each cut only once. The genes are made of random codons, so they have the right size and shape but aren't real proteins.
 
 ## 2. Starting N-Zoom
 
@@ -71,7 +82,7 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ File  Tools  About                                                   │
+│ File  Edit  Tools  About                                             │
 │ [Open] [Fetch from NCBI]  path/to/current/file.gb                    │
 ├────────────┬──────────────────────────────────────┬──────────────────┤
 │            │  Sequence title                      │ Sequence         │
@@ -82,6 +93,8 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 │            │  │ Feature table  │                  │  Reverse compl.  │
 │            │  └────────────────┘                  │  Translate DNA   │
 │            │                                      │  Find restr. ... │
+│            │                                      │  Find ORFs       │
+│            │                                      │  Add feature     │
 ├────────────┴──────────────────────────────────────┴──────────────────┤
 │ Status bar                                                           │
 └──────────────────────────────────────────────────────────────────────┘
@@ -91,12 +104,14 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 |---|---|
 | **Record list** (left) | Every sequence currently loaded. Click one to display it. |
 | **Viewer tabs** (centre) | **Map** shows the plasmid map; **Sequence** shows the bases or amino acids. |
-| **Feature table** (centre, bottom) | Every annotated feature of the current record. |
+| **Feature table** (centre, bottom) | Every annotated feature of the current record, plus any ORFs found. |
 | **Information panel** (right) | Type, length, topology, GC content, feature count and composition. |
 | **Actions** (right) | One-click tools for the current record. |
-| **Status bar** (bottom) | Short messages: what was loaded, what was found, which feature is selected. |
+| **Status bar** (bottom) | Messages on the left (what was loaded or found, which feature is selected). On the right: a moving bar while a background task runs, and the cursor position or current selection. |
 
 You can drag the borders between the panels to resize them.
+
+The **window title** shows the file name. A `*` after it means there are unsaved changes.
 
 ---
 
@@ -141,7 +156,9 @@ Use **Tools → Fetch from NCBI…** or the **Fetch from NCBI** button.
 2. **The first time only**, you'll be asked for an email address. NCBI requires one with every request, so they can contact you if something goes wrong. N-Zoom saves it on your computer and sends it only to NCBI.
 3. The record is downloaded in full GenBank format, with features. It's **added to the end of the record list** and selected.
 
-You need an internet connection. The window doesn't respond while the download runs. Large records, such as whole bacterial genomes, can take a while.
+You need an internet connection. The download runs in the background: a moving bar appears in the status bar, and you can keep working in the meantime. The Fetch button and menu item are disabled until it finishes. Large records, such as whole bacterial genomes, can take a while.
+
+If the download fails, for example because the accession doesn't exist or there's no connection, an error message explains why.
 
 Only nucleotide records (NCBI's *nuccore* database) can be fetched. Protein accessions won't work.
 
@@ -161,7 +178,9 @@ The **Map** tab draws the current DNA record as a circle, with position 0 at the
 | **Colored arcs inside the circle** | Features on the **reverse** strand |
 | **Arrowheads** | Show which way a feature reads (its 3′ end) |
 | **Labels with grey leader lines** | Feature names, connected to the arc they belong to |
+| **Thin light-green arcs** | ORFs, after you run the [ORF finder](#13-finding-open-reading-frames-orfs) |
 | **Red ticks and red labels** | Restriction sites, after you run a restriction search |
+| **Yellow band on the circle** | The region selected in the Sequence view |
 | **Centre text** | Record name and length in bp |
 
 ### Overlapping features
@@ -182,6 +201,8 @@ On very busy maps (more than 300 labels in total), labels are switched off compl
 
 **Click an arc** to select that feature. Its row is selected in the feature table, it's highlighted in the Sequence view, and its arc is drawn thicker.
 
+**Right-click an arc** for that feature's [menu](#11-right-click-menus): translate it, copy it, edit it, and so on.
+
 ### When the map is unavailable
 
 The Map tab is disabled for protein and "Unknown" sequences. Linear DNA and FASTA records are still drawn as a circle. The Topology field in the [information panel](#9-sequence-information-panel) tells you whether the molecule is really circular.
@@ -194,15 +215,35 @@ The **source** feature, which spans the whole sequence in every GenBank file, is
 
 The **Sequence** tab shows the full sequence as wrapping text in a monospace font.
 
-- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#14-color-reference)). Longer sequences are shown in plain black so they load quickly.
+- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#17-color-reference)). Longer sequences are shown in plain black so they load quickly.
 - **Feature highlighting:** when you select a feature, its region is highlighted in yellow and the view scrolls to it. Features with several parts, such as origin-crossing features or joined exons, highlight every part.
-- The view is **read-only**. You can select and copy text with the mouse, but you can't edit it.
+- The view is **read-only**. You can select and copy text, but you can't edit it.
+
+### Selecting a region
+
+Select bases with the mouse, or with **Shift + arrow keys**. **Ctrl+A** selects everything.
+
+The right side of the status bar shows:
+
+| What you do | Status bar shows |
+|---|---|
+| Click somewhere (no selection) | `Position 42 of 4,000`: the base just after the cursor |
+| Select a region of DNA | `Selected 601–657 (57 bp) · GC 57.9%` |
+| Select a region of protein | `Selected 10–45 (36 aa)` |
+
+Positions are 1-based and include both ends, matching the feature table and GenBank files.
+
+For DNA, the selected region is also shaded **yellow on the Map**, so you can see where it lies on the plasmid.
+
+**Ctrl+C** copies the selected bases. **Right-click** the selection for more: copy the reverse complement, translate it, or turn it into a feature (see [Right-click menus](#11-right-click-menus)).
 
 ---
 
 ## 8. The feature table
 
 Below the viewer is a table of every annotated feature in the current record. The `source` feature is hidden, because it just covers the entire sequence.
+
+After you run the [ORF finder](#13-finding-open-reading-frames-orfs), ORFs are listed here too, in *grey italics* with type `ORF`, so you can tell them apart from real annotations.
 
 | Column | Meaning |
 |---|---|
@@ -225,6 +266,9 @@ For a feature that crosses position 0, **Start is larger than End**. For example
 
 - **Click a row** to select the feature on the map and highlight it in the Sequence view. The status bar shows the feature's type, name and exact location.
 - **Click a column header** to sort by that column. Click it again to reverse the order.
+- **Double-click a row** to edit that feature. For an ORF, double-clicking turns it into a CDS feature.
+- **Right-click a row** for the feature's [menu](#11-right-click-menus).
+- Press **Delete** to delete the selected feature (after confirming).
 
 The status bar shows the location in Biopython's internal notation, which counts from **0** and excludes the end. For example, `[2800:3000](+)` is bases 2801–3000 in normal GenBank numbering. The table always uses normal numbering.
 
@@ -238,7 +282,7 @@ The status bar shows the location in Biopython's internal notation, which counts
 | **Length** | Number of bases or residues |
 | **Topology** | `circular` or `linear` as recorded in a GenBank file; `unknown` for FASTA |
 | **GC %** | (G + C) ÷ total length × 100. DNA only. Ambiguous letters such as `N` count toward the total but not toward GC. |
-| **Features** | Number of features listed in the feature table |
+| **Features** | Number of annotated features, plus the number of ORFs found, if any. For example `10 (+ 2 ORFs)`. |
 | **Composition** | Count of the 12 most common letters, most frequent first |
 
 ---
@@ -272,66 +316,231 @@ A **cut position** is the 1-based position of the first base *after* the cut on 
 
 Use **Tools → Clear restriction sites**. Sites are also cleared automatically when you select a different record.
 
+### Running in the background
+
+The search runs in the background, with a moving bar in the status bar. The button and menu item are disabled until it finishes. The results list opens in its own window, which can stay open while you keep using N-Zoom.
+
+If you switch to another record before the search finishes, the results are discarded rather than drawn on the wrong map. The status bar tells you to run the search again.
+
 ### Large sequences
 
 For sequences over 2,000,000 bp, N-Zoom asks for confirmation first, because the search can take a long time.
 
 ---
 
-## 11. Translation, reverse complement and copying
+## 11. Right-click menus
 
-All three tools put their result on the **clipboard**, ready to paste elsewhere. None of them change the loaded sequence.
+Most tools that act on *part* of a sequence are in right-click menus.
 
-### Copy sequence
+### On a selection in the Sequence view
 
-This copies the current sequence exactly as displayed: uppercase, with no spaces or line breaks.
+Select some bases, then right-click the selection:
 
-### Reverse complement (DNA only)
+| Menu item | What it does |
+|---|---|
+| **Copy** | Copies the selected bases |
+| **Copy reverse complement** | Copies the reverse complement of the selection (DNA only) |
+| **Translate selection** | Translates the selection, reading forward from its first base (DNA only) |
+| **Translate reverse complement** | Translates the other strand of the selection (DNA only) |
+| **Create feature from selection…** | Opens the [feature dialog](#14-adding-editing-and-deleting-features) with Start and End already filled in |
+| **Select all** | Selects the whole sequence |
 
-This copies the reverse complement of the whole sequence. Ambiguity codes are complemented correctly, for example `R` ↔ `Y`.
+Right-clicking with nothing selected offers **Add feature…** and **Select all**.
 
-### Translate DNA (DNA only)
+### On a feature or ORF
 
-This copies the protein translation of the whole sequence and shows a preview of up to 500 amino acids.
+Right-click a feature's arc on the map, or its row in the feature table. The first, greyed-out line of the menu shows which feature you clicked.
 
-- Translation starts at the **first base, in frame 1**, using the **standard genetic code**.
+| Menu item | What it does |
+|---|---|
+| **Select in sequence** | Switches to the Sequence tab and selects the feature's bases, so the status bar shows its length and GC%. A feature made of several pieces is highlighted instead. |
+| **Copy sequence** | Copies the feature's sequence **as read on its own strand**: reverse-strand features are reverse-complemented, and pieces of joined features are put together in order. |
+| **Translate** | Translates the feature (see [below](#translating-a-feature)). DNA only. |
+| **Edit feature…** | Opens the [feature dialog](#14-adding-editing-and-deleting-features) |
+| **Delete feature** | Deletes the feature, after asking you to confirm |
+| **Add as CDS feature…** | ORFs only: turns the ORF into a real CDS feature |
+
+---
+
+## 12. Translation, reverse complement and copying
+
+None of these tools change the loaded sequence.
+
+### Copy sequence and Reverse complement (Actions panel)
+
+**Copy sequence** copies the whole current sequence exactly as displayed: uppercase, with no spaces or line breaks.
+
+**Reverse complement** copies the reverse complement of the whole sequence (DNA only). Ambiguity codes are complemented correctly, for example `R` ↔ `Y`.
+
+To copy only part of a sequence, use the [right-click menus](#11-right-click-menus).
+
+### The Translation window
+
+Translations open in a **Translation** window showing the protein, with a **Copy** button. You can keep several of these windows open and carry on working.
+
+The line above the protein summarises what was translated, for example:
+
+`GFP (CDS, 701–1,417, forward strand) · 717 bp → 238 aa + stop`
+
+It also warns you when something looks wrong:
+
+| Note | Meaning |
+|---|---|
+| `last 2 base(s) ignored` | The length isn't a multiple of 3, so the incomplete codon at the end was skipped |
+| `3 internal stop codon(s)` | There are stop codons (`*`) before the end: the reading frame or coordinates may be wrong |
+| `genetic code 11` | A genetic code other than the standard one was used (see below) |
+| `matches / differs from the /translation stored in the file` | GenBank CDS features from NCBI often store the expected protein; N-Zoom compares its result with it |
+
+### What can be translated
+
+| How | What is translated |
+|---|---|
+| **Translate DNA** button, or **Tools → Translate whole sequence** | The whole sequence, from base 1 |
+| Right-click a selection → **Translate selection** | The selected bases, from the first selected base |
+| Right-click a selection → **Translate reverse complement** | The reverse complement of the selection |
+| Right-click a feature → **Translate** | The feature, as described below |
+
+### Translating a feature
+
+Feature translation follows the GenBank annotations:
+
+- **Strand:** reverse-strand features are read on the reverse strand.
+- **Pieces:** features made of several pieces (exons, or features crossing the origin) are joined before translating.
+- **`/codon_start`:** if the feature has this qualifier (1, 2 or 3), translation starts at that base.
+- **`/transl_table`:** if present, that genetic code is used, for example `11` for bacteria. Otherwise the standard code (1) is used.
+
+### Translation rules
+
 - Gaps (`-`) are removed and `U` is read as `T` before translating.
-- Leftover bases at the end that don't make a full codon are ignored.
 - Stop codons appear as `*`. Translation continues past them.
 - Codons with ambiguous bases translate as `X` when the amino acid can't be determined.
 
-To translate a single gene, copy that region first and open it as its own sequence. Translating a selected feature directly isn't supported yet.
+---
+
+## 13. Finding open reading frames (ORFs)
+
+An **open reading frame** is a stretch of DNA that could code for a protein: it starts with a start codon (`ATG`) and runs, without interruption, to a stop codon (`TAA`, `TAG` or `TGA`).
+
+Use **Tools → Find ORFs…** or the **Find ORFs** button (DNA only).
+
+1. Enter the **minimum length** in amino acids. The default is 100. Shorter limits find many more ORFs, most of them occurring by chance. N-Zoom remembers your choice for next time.
+2. The search runs in the background, like the restriction search.
+3. ORFs appear on the **map** as thin light-green arcs, and in the **feature table** in grey italics, named `ORF1 (238 aa)`, `ORF2 (…)` and so on, in order of position.
+
+### How ORFs are found
+
+- All **six reading frames** are searched: three on each strand.
+- Each ORF runs from the **first ATG after a stop codon** to the **next stop codon**. ATGs further inside an ORF don't produce extra, shorter ORFs.
+- The stop codon **is included** in the ORF's coordinates, as in GenBank CDS features. The length in the name doesn't count it.
+- On **circular** records, ORFs can run across the origin. On linear and FASTA records they can't.
+- The **standard genetic code** is used.
+
+### ORFs that are already annotated
+
+If an ORF has exactly the same location and strand as a feature that's already in the file, it isn't shown again. The status bar tells you how many were hidden, for example `(2 already annotated, not shown.)`.
+
+### Keeping an ORF
+
+ORFs are **suggestions**: they're not part of your file and aren't saved. To keep one, right-click it and choose **Add as CDS feature…**, or double-click its row. The feature dialog opens with type `CDS`, the ORF's name, coordinates and strand filled in. Change the name, then click OK. The ORF is replaced by the new feature.
+
+### Clearing ORFs
+
+Use **Tools → Clear ORFs**. ORFs are also cleared when you select a different record.
 
 ---
 
-## 12. Saving and exporting
+## 14. Adding, editing and deleting features
 
-Use **File → Save As…** or **Ctrl+S**.
+All changes are made to the records in memory. Use [Save](#15-saving-and-exporting) to write them to a file.
 
-- **Everything currently in the record list is saved**, not only the selected record.
-- Choose **GenBank** to keep features and annotations, or **FASTA** for sequences only.
+### Adding a feature
+
+Any of these opens the **Add feature** dialog:
+
+- **Edit → Add feature…** (Ctrl+E) or the **Add feature** button. If bases are selected in the Sequence view, Start and End are filled in from the selection.
+- Right-click a selection → **Create feature from selection…**
+- Right-click an ORF → **Add as CDS feature…**
+
+### The feature dialog
+
+| Field | Notes |
+|---|---|
+| **Name** | Saved as the `/label` qualifier, the name shown everywhere in N-Zoom |
+| **Type** | Pick a common GenBank feature type from the list, or type any other |
+| **Start** / **End** | 1-based and inclusive, as in the feature table and GenBank files |
+| **Strand** | Forward, Reverse, or None |
+| **Note** | Optional; saved as the `/note` qualifier |
+
+Below the fields, the dialog shows the feature's length.
+
+**Features crossing the origin:** on a **circular** record, set Start larger than End. For example, Start 3,901 and End 60 on a 4,000 bp plasmid. The dialog shows `crosses the origin`. On a linear record this isn't possible: the dialog shows a red warning and OK is disabled.
+
+### Editing a feature
+
+**Double-click** the feature's row, right-click it → **Edit feature…**, or select it and use **Edit → Edit selected feature…**.
+
+Features made of **several separate pieces**, such as genes with exons, can't be described by a single Start and End. For these, only the name, type and note can be changed; the location fields are disabled. Origin-crossing features count as a single piece and can be edited normally.
+
+If a feature's name came from `/gene` or `/product` rather than `/label`, editing the name adds a `/label`. The original qualifiers are kept.
+
+### Deleting a feature
+
+Right-click it → **Delete feature**, select it and press **Delete**, or use **Edit → Delete selected feature**. N-Zoom asks you to confirm first.
+
+### Undo
+
+There's no undo yet. To throw away all changes since your last save, open the file again and choose **Discard** when asked about unsaved changes.
+
+---
+
+## 15. Saving and exporting
+
+| Command | What it does |
+|---|---|
+| **File → Save** (Ctrl+S) | Saves to the file you opened, in the same format |
+| **File → Save As…** (Ctrl+Shift+S) | Saves to a new file. Choose **GenBank** or **FASTA**. |
+
+- **Everything currently in the record list is saved**, not only the selected record. This includes records fetched from NCBI.
 - If you don't type an extension, `.gb` or `.fasta` is added for you.
 
-Saving as FASTA **drops all features**. Use GenBank if you want to keep them.
+### Features and FASTA files
 
-If you save FASTA-loaded records as GenBank, N-Zoom fills in the molecule type (DNA or protein) automatically, because the GenBank format requires it.
+FASTA files can't store features. So:
+
+- **Save** on a file that was opened as FASTA but now has features asks you where to save a **GenBank** file instead, rather than silently dropping the features.
+- **Save As** with FASTA chosen warns you that all annotations will be left out, and asks you to confirm.
+
+### Unsaved changes
+
+The window title shows `*` when there are unsaved changes: added, edited or deleted features, or records fetched from NCBI. If you open another file or close N-Zoom with unsaved changes, you're asked whether to **Save**, **Discard** them, or **Cancel**.
+
+### Long names in GenBank files
+
+The GenBank format allows at most **16 characters, without spaces**, for a sequence name. Names from FASTA files are often longer. N-Zoom shortens them **in the saved file only** and tells you which names were changed. The records in N-Zoom keep their full names.
+
+If you save FASTA-loaded records as GenBank, N-Zoom also fills in the molecule type (DNA or protein) automatically, because the GenBank format requires it.
 
 ---
 
-## 13. Keyboard shortcuts
+## 16. Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
 | **Ctrl+O** | Open a file |
-| **Ctrl+S** | Save As |
+| **Ctrl+S** | Save |
+| **Ctrl+Shift+S** | Save As |
+| **Ctrl+E** | Add feature |
+| **Delete** | Delete the selected feature (when the feature table has focus) |
 | **Ctrl+Q** | Exit N-Zoom |
+| **Ctrl+A** | Select the whole sequence (in the Sequence view) |
 | **Ctrl+C** | Copy selected text in the Sequence view |
+| **Shift + arrow keys** | Extend the selection in the Sequence view |
 
 On macOS, use **Cmd** instead of Ctrl.
 
 ---
 
-## 14. Color reference
+## 17. Color reference
 
 ### DNA bases (Sequence view)
 
@@ -372,21 +581,22 @@ On macOS, use **Cmd** instead of Ctrl.
 | `RBS` | Purple |
 | `regulatory` | Deep orange |
 | `misc_feature` | Grey |
+| ORFs (from the ORF finder) | Light green, thinner arcs |
 | any other type | Blue-grey |
 
-Restriction sites are always dark red.
+Restriction sites are always dark red. The selected region is shaded yellow.
 
 ---
 
-## 15. File format notes
+## 18. File format notes
 
-### Writing your own GenBank features
+### How features look in a GenBank file
 
 Features in a GenBank file look like this:
 
 ```
 FEATURES             Location/Qualifiers
-     CDS             701..1700
+     CDS             701..1417
                      /label="GFP"
      CDS             complement(2106..2966)
                      /label="AmpR"
@@ -396,32 +606,33 @@ FEATURES             Location/Qualifiers
 
 | Location | Meaning |
 |---|---|
-| `701..1700` | Bases 701 to 1700, forward strand |
+| `701..1417` | Bases 701 to 1417, forward strand |
 | `complement(2106..2966)` | Same kind of range, on the reverse strand |
 | `join(3901..4000,1..60)` | A feature made of several parts; used for origin-crossing features and exons |
 
-GenBank is a column-based format: the feature type starts at column 6, and the location and qualifiers at column 22. Hand-edited files that break this layout may fail to open. It's safest to create or edit GenBank files with N-Zoom's Save As or another sequence tool.
+GenBank is a column-based format: the feature type starts at column 6, and the location and qualifiers at column 22. Hand-edited files that break this layout may fail to open. The easiest way to add features is with N-Zoom's [feature dialog](#14-adding-editing-and-deleting-features).
 
 ### Circular vs linear
 
-Topology is read from the `LOCUS` line of a GenBank file, for example `LOCUS pUC19 2686 bp DNA circular SYN`. FASTA files have no way to store topology.
+Topology is read from the `LOCUS` line of a GenBank file, for example `LOCUS pUC19 2686 bp DNA circular SYN`. FASTA files have no way to store topology, so FASTA records are treated as linear: features and ORFs can't cross the origin.
 
 ---
 
-## 16. Known limitations
+## 19. Known limitations
 
-These apply to version 0.5.0:
+These apply to version 0.7.0:
 
-- **No editing.** Sequences and features can't be changed inside N-Zoom yet.
-- **The window freezes** during NCBI downloads and long restriction searches.
+- **The sequence itself can't be edited.** Features can be added, edited and deleted, but bases can't be inserted, removed or changed.
+- **No undo** for feature changes. Discarding unsaved changes is the only way back.
+- **Background tasks can't be cancelled.** If you close N-Zoom during an NCBI download, restriction search or ORF search, it waits for the task to finish before closing.
 - **The map is always circular.** Linear molecules are also drawn as a circle; there's no linear map view yet.
-- **Translation uses frame 1 of the whole sequence** only. There's no six-frame or per-feature translation.
-- **Saving GenBank can fail for long record names.** The GenBank format limits the name on the LOCUS line to 16 characters, and N-Zoom shows an error if a name is too long.
+- **The ORF finder only uses ATG** as a start codon, and the standard genetic code.
+- **Topology can't be changed.** A FASTA record can't be marked as circular.
 - **Very large sequences** (whole genomes) open and display, but the map becomes crowded and labels are hidden.
 
 ---
 
-## 17. Troubleshooting
+## 20. Troubleshooting
 
 | Problem | Solution |
 |---|---|
@@ -433,5 +644,7 @@ These apply to version 0.5.0:
 | "Could not read file" | The file is damaged, or its extension doesn't match its contents (for example a GenBank file named `.fasta`). Rename it to the correct extension. |
 | NCBI fetch fails | Check your internet connection and the accession number. Make sure it's a nucleotide record. NCBI may also be temporarily busy; try again in a minute. |
 | A wrong NCBI email was saved | Delete the saved N-Zoom settings: on Windows the registry key `HKEY_CURRENT_USER\Software\mikeph52\N-Zoom`; on Linux `~/.config/mikeph52/N-Zoom.conf`; on macOS `~/Library/Preferences/com.mikeph52.N-Zoom.plist` |
-| "Could not save file" with GenBank | A record name is longer than 16 characters. Save as FASTA, or rename the record. |
+| The ORF finder finds nothing | Lower the minimum length. Also, ORFs that are already annotated aren't shown again; check the status bar message. |
+| OK is greyed out in the feature dialog | Start is after End on a linear record. Swap them, or see [Circular vs linear](#circular-vs-linear). |
+| A translation has many `*` in the middle | The coordinates, strand or `/codon_start` of the feature are probably wrong |
 | Sequence appears in black instead of colors | It's longer than 50,000 characters. This is intentional, to keep the app fast. |
