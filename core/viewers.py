@@ -5,6 +5,7 @@ All view functions:
 - CircularDNAViewer   plasmid map with features, ticks and restriction sites
 """
 import math
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
@@ -17,6 +18,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import QTextEdit, QWidget
+
 from .seqtools import (
     DNA_COLORS,
     MAX_COLORED_LENGTH,
@@ -26,14 +28,26 @@ from .seqtools import (
     feature_parts,
     feature_strand,
     normalize_seq,
-) # dot for loading from core
+)
 
-# text view
+
+# =================================================================== text view
 class SequenceViewer(QTextEdit):
+    # (start, end) in 0-based, end-exclusive sequence coordinates.
+    # start == end means nothing is selected and the cursor is at `start`.
+    selectionInfo = Signal(int, int)
+
     def __init__(self):
         super().__init__()
         self.setReadOnly(True)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        # allow Shift+arrow keys as well as the mouse for selecting
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.selectionChanged.connect(self._emit_selection)
+        self.cursorPositionChanged.connect(self._emit_selection)
 
         font = QFont("Monospace")
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -67,7 +81,7 @@ class SequenceViewer(QTextEdit):
         self._move_to(0)
 
     def highlight_parts(self, parts, color="#fff59d"):
-        # Give each (start, end) region a background color and scroll to it.
+        """Give each (start, end) region a background color and scroll to it."""
         last = max(0, self.document().characterCount() - 1)
         selections = []
         for start, end in parts:
@@ -84,6 +98,12 @@ class SequenceViewer(QTextEdit):
         if parts:
             self._move_to(parts[0][0])
 
+    def _emit_selection(self):
+        # the text is the bare sequence (no newlines), so document positions
+        # are exactly sequence positions
+        cursor = self.textCursor()
+        self.selectionInfo.emit(cursor.selectionStart(), cursor.selectionEnd())
+
     def _move_to(self, position):
         last = max(0, self.document().characterCount() - 1)
         cursor = QTextCursor(self.document())
@@ -91,17 +111,20 @@ class SequenceViewer(QTextEdit):
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
 
-# map view
+
+# =================================================================== map view
 MAX_LANES = 4        # feature rings per strand before features start to stack
 LANE_GAP = 11        # pixels between rings
 FEATURE_WIDTH = 8    # thickness of a feature arc
 MAX_LABELS = 300     # skip labels on very busy maps (e.g. whole genomes)
 
+
 def _overlaps(a, b):
     return a[0] < b[1] and b[0] < a[1]
 
+
 def nice_interval(length, target=10):
-    # Tick spacing of 1, 2 or 5 x 10^n giving about `target` ticks.
+    """Tick spacing of 1, 2 or 5 x 10^n giving about `target` ticks."""
     raw = length / target
     if raw <= 1:
         return 1
@@ -110,6 +133,7 @@ def nice_interval(length, target=10):
         if step * magnitude >= raw:
             return int(step * magnitude)
     return int(10 * magnitude)
+
 
 class CircularDNAViewer(QWidget):
     featureClicked = Signal(int)  # index into the features list
@@ -121,23 +145,25 @@ class CircularDNAViewer(QWidget):
         self.features = []
         self.sites = {}
         self.selected = -1
+        self.highlight = None  # (start, end) of the text selection, or None
         self._lanes = {}
         self._hit_regions = []
         self._cx = self._cy = 0.0
         self.setMinimumSize(450, 450)
 
-    # public API
+    # ---------------------------------------------------------- public API
     def set_record(self, length, title, features=None):
         self.length = length
         self.title = title
         self.features = list(features or [])
         self.sites = {}
         self.selected = -1
+        self.highlight = None
         self._lanes = self._assign_lanes()
         self.update()
 
     def set_sites(self, sites):
-        # sites: {enzyme name: [positions]}
+        """sites: {enzyme name: [positions]}"""
         self.sites = dict(sites)
         self.update()
 
@@ -145,12 +171,19 @@ class CircularDNAViewer(QWidget):
         self.selected = index
         self.update()
 
+    def set_highlight(self, start=None, end=None):
+        """Shade the region start..end (0-based, end exclusive); no args clears it."""
+        new = (start, end) if start is not None and end is not None and end > start else None
+        if new != self.highlight:
+            self.highlight = new
+            self.update()
+
     def clear_seq(self):
         self.set_record(0, "", [])
 
-    # geometry
+    # ---------------------------------------------------------- geometry
     def _angle(self, position):
-        # Radians; 0 bp is at 12 o'clock, positions run clockwise.
+        """Radians; 0 bp is at 12 o'clock, positions run clockwise."""
         return position / self.length * 2 * math.pi - math.pi / 2
 
     def _point(self, position, r):
@@ -161,7 +194,7 @@ class CircularDNAViewer(QWidget):
         return feature_strand(self.features[index]) != -1
 
     def _assign_lanes(self):
-        # Put each feature on a ring so overlapping features don't collide.
+        """Put each feature on a ring so overlapping features don't collide."""
         lanes = {}
         for forward in (True, False):
             group = [
@@ -196,7 +229,7 @@ class CircularDNAViewer(QWidget):
         start, end = max(parts, key=lambda p: p[1] - p[0])
         return (start + end) / 2
 
-    # painting
+    # ---------------------------------------------------------- painting
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -218,6 +251,16 @@ class CircularDNAViewer(QWidget):
         painter.setPen(QPen(QColor("#333333"), 3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QPointF(self._cx, self._cy), radius, radius)
+
+        # selected region from the Sequence tab, as a translucent band
+        if self.highlight:
+            start, end = self.highlight
+            band = QPen(QColor(255, 193, 7, 160), 18)
+            band.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(band)
+            rect = QRectF(self._cx - radius, self._cy - radius, 2 * radius, 2 * radius)
+            span = max((end - start) / self.length * 360, 0.5)  # stay visible when tiny
+            painter.drawArc(rect, round((90 - start / self.length * 360) * 16), round(-span * 16))
 
         self._draw_ticks(painter, radius, inner_r - 14)
 
@@ -355,7 +398,7 @@ class CircularDNAViewer(QWidget):
         painter.drawText(QRectF(left, self._cy, box_w, 22),
                          Qt.AlignmentFlag.AlignCenter, f"{self.length:,} bp")
 
-    # enaBLE clicking
+    # ---------------------------------------------------------- clicking
     def mousePressEvent(self, event):
         if self.length > 0:
             p = event.position()

@@ -1,11 +1,13 @@
 # N-Zoom by mikeph52, Init 12/9/2026
-# the main file
+"""
+main.py — the N-Zoom main window. Run with:  python main.py
+"""
 import sys
 from collections import Counter
 from pathlib import Path
 
 from Bio.Seq import Seq
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QThreadPool
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -33,8 +36,9 @@ from PySide6.QtWidgets import (
 
 from core import seqtools as st
 from core.viewers import CircularDNAViewer, SequenceViewer
+from core.workers import Task
 
-VERSION = "0.7.5"
+VERSION = "0.8.1"
 
 OPEN_FILTER = (
     "Sequence files (*.gb *.gbk *.genbank *.gbff *.fasta *.fa *.faa *.fna *.fas);;"
@@ -44,11 +48,13 @@ OPEN_FILTER = (
 )
 SAVE_FILTER = "GenBank (*.gb);;FASTA (*.fasta)"
 
+
 def number_item(value):
-    # Table cell that sorts numerically."""
+    """Table cell that sorts numerically."""
     item = QTableWidgetItem()
     item.setData(Qt.ItemDataRole.DisplayRole, value)
     return item
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -62,10 +68,15 @@ class MainWindow(QMainWindow):
         self.current_sequence = ""
         self.current_features = []
 
+        # background work (NCBI downloads, restriction searches)
+        self.pool = QThreadPool(self)
+        self.tasks = {}           # kind -> running Task, e.g. {"ncbi": task}
+        self.sites_dialog = None
+
         self.build_ui()
         self.build_menu()
 
-    # UI
+    # ================================================================ UI
     def build_menu(self):
         file_menu = self.menuBar().addMenu("File")
 
@@ -87,18 +98,18 @@ class MainWindow(QMainWindow):
 
         tools_menu = self.menuBar().addMenu("Tools")
 
-        ncbi_action = QAction("Fetch from NCBI...", self)
-        ncbi_action.triggered.connect(self.fetch_from_ncbi)
-        tools_menu.addAction(ncbi_action)
+        self.ncbi_action = QAction("Fetch from NCBI...", self)
+        self.ncbi_action.triggered.connect(self.fetch_from_ncbi)
+        tools_menu.addAction(self.ncbi_action)
         tools_menu.addSeparator()
 
         translate_action = QAction("Translate sequence", self)
         translate_action.triggered.connect(self.show_translation)
         tools_menu.addAction(translate_action)
 
-        rs_action = QAction("Find restriction sites", self)
-        rs_action.triggered.connect(self.find_restriction_sites)
-        tools_menu.addAction(rs_action)
+        self.rs_action = QAction("Find restriction sites", self)
+        self.rs_action.triggered.connect(self.find_restriction_sites)
+        tools_menu.addAction(self.rs_action)
 
         clear_rs_action = QAction("Clear restriction sites", self)
         clear_rs_action.triggered.connect(lambda: self.circular_viewer.set_sites({}))
@@ -118,9 +129,9 @@ class MainWindow(QMainWindow):
         open_button = QPushButton("Open")
         open_button.clicked.connect(self.open_file)
         top_bar.addWidget(open_button)
-        ncbi_button = QPushButton("Fetch from NCBI")
-        ncbi_button.clicked.connect(self.fetch_from_ncbi)
-        top_bar.addWidget(ncbi_button)
+        self.ncbi_button = QPushButton("Fetch from NCBI")
+        self.ncbi_button.clicked.connect(self.fetch_from_ncbi)
+        top_bar.addWidget(self.ncbi_button)
         self.file_label = QLabel("No file loaded")
         self.file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         top_bar.addWidget(self.file_label, 1)
@@ -151,6 +162,7 @@ class MainWindow(QMainWindow):
         self.circular_viewer.featureClicked.connect(self.select_feature_row)
         self.view_tabs.addTab(self.circular_viewer, "Map")
         self.viewer = SequenceViewer()
+        self.viewer.selectionInfo.connect(self.on_sequence_selection)
         self.view_tabs.addTab(self.viewer, "Sequence")
         center_split.addWidget(self.view_tabs)
 
@@ -197,11 +209,13 @@ class MainWindow(QMainWindow):
             ("Copy sequence", self.copy_seq),
             ("Reverse complement", self.show_reverse_complement),
             ("Translate DNA", self.show_translation),
-            ("Find restriction sites", self.find_restriction_sites),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
             actions_layout.addWidget(button)
+        self.rs_button = QPushButton("Find restriction sites")
+        self.rs_button.clicked.connect(self.find_restriction_sites)
+        actions_layout.addWidget(self.rs_button)
         right_layout.addWidget(actions_box)
         right_layout.addStretch()
 
@@ -210,9 +224,23 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter, 1)
 
         self.setCentralWidget(root)
+
+        # status bar: temporary messages on the left, permanent widgets on the right
+        self.busy_bar = QProgressBar()
+        self.busy_bar.setRange(0, 0)  # 0..0 = animated "working" bar
+        self.busy_bar.setMaximumWidth(120)
+        self.busy_bar.setTextVisible(False)
+        self.busy_bar.hide()
+        self.statusBar().addPermanentWidget(self.busy_bar)
+        self.position_label = QLabel("")
+        self.position_label.setMinimumWidth(260)
+        self.position_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.statusBar().addPermanentWidget(self.position_label)
         self.statusBar().showMessage("Ready")
 
-    # loading
+    # ================================================================ loading
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open sequence file", "", OPEN_FILTER)
         if not path:
@@ -231,6 +259,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded {len(records)} {fmt} record(s)")
 
     def fetch_from_ncbi(self):
+        if "ncbi" in self.tasks:
+            return  # a download is already running
         accession, ok = QInputDialog.getText(
             self, "Fetch from NCBI", "Nucleotide accession (e.g. L09137 for pUC19):"
         )
@@ -250,19 +280,17 @@ class MainWindow(QMainWindow):
                 return
             self.settings.setValue("ncbi_email", email)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage(f"Fetching {accession} from NCBI...")
-        QApplication.processEvents()
-        try:
-            record = st.fetch_genbank(accession, email)
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage("NCBI fetch failed", 5000)
-            QMessageBox.critical(self, "NCBI error", f"Could not fetch {accession}:\n{exc}")
-            return
-        QApplication.restoreOverrideCursor()
+        self.start_task(
+            "ncbi", f"Fetching {accession} from NCBI...",
+            st.fetch_genbank, accession, email,
+            on_done=self.add_fetched_record,
+            on_fail=lambda message: QMessageBox.critical(
+                self, "NCBI error", f"Could not fetch {accession}:\n{message}"
+            ),
+        )
 
-        # add to whatever is already open
+    def add_fetched_record(self, record):
+        # added to whatever is already open
         self.show_records(self.records + [record], select=len(self.records))
         self.statusBar().showMessage(f"Fetched {record.id} from NCBI", 5000)
 
@@ -297,7 +325,7 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Saved {len(self.records)} record(s) to {path}", 5000)
 
-    # display
+    # ================================================================ display
     def select_record(self, index):
         if index < 0 or index >= len(self.records):
             return
@@ -379,14 +407,94 @@ class MainWindow(QMainWindow):
         )
 
     def select_feature_row(self, index):
-        # Called when a feature is clicked on the map.
+        """Called when a feature is clicked on the map."""
         for row in range(self.feature_table.rowCount()):
             if self.feature_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == index:
                 self.feature_table.selectRow(row)
                 self.feature_table.scrollToItem(self.feature_table.item(row, 0))
                 return
 
-    # tools
+    def on_sequence_selection(self, start, end):
+        """Show the cursor position or selected range in the status bar."""
+        sequence = self.current_sequence
+        if not sequence:
+            self.position_label.setText("")
+            self.circular_viewer.set_highlight()
+            return
+
+        is_dna = st.detect_seq_type(sequence) == "DNA"
+        unit = "bp" if is_dna else "aa"
+        if start == end:
+            position = min(start + 1, len(sequence))
+            self.position_label.setText(f"Position {position:,} of {len(sequence):,}")
+            self.circular_viewer.set_highlight()
+            return
+
+        text = f"Selected {start + 1:,}\u2013{end:,}  ({end - start:,} {unit})"
+        if is_dna:
+            region = sequence[start:end]
+            gc = (region.count("G") + region.count("C")) / len(region) * 100
+            text += f"  \u00b7  GC {gc:.1f}%"
+            self.circular_viewer.set_highlight(start, end)
+        self.position_label.setText(text)
+
+    # ================================================================ background tasks
+    def start_task(self, kind, message, fn, *args, on_done=None, on_fail=None, **kwargs):
+        """Run fn(*args, **kwargs) on a background thread.
+
+        `kind` names the job ("ncbi", "restriction"); only one job of each kind
+        runs at a time. on_done(result) / on_fail(message) run in the GUI thread.
+        """
+        if kind in self.tasks:
+            self.statusBar().showMessage("Still working on the previous request...", 3000)
+            return
+        task = Task(fn, *args, on_done=on_done, on_fail=on_fail, **kwargs)
+        task.kind = kind
+        # connect to methods of this window, so Qt runs them in the GUI thread
+        task.signals.finished.connect(self.on_task_finished)
+        task.signals.failed.connect(self.on_task_failed)
+        self.tasks[kind] = task
+        self.update_busy_state()
+        self.statusBar().showMessage(message)
+        self.pool.start(task)
+
+    def on_task_finished(self, payload):
+        task, result = payload
+        self.end_task(task)
+        if task.on_done:
+            task.on_done(result)
+
+    def on_task_failed(self, payload):
+        task, message = payload
+        self.end_task(task)
+        self.statusBar().showMessage("Failed: " + message, 8000)
+        if task.on_fail:
+            task.on_fail(message)
+
+    def end_task(self, task):
+        self.tasks.pop(task.kind, None)
+        self.statusBar().clearMessage()
+        self.update_busy_state()
+
+    def update_busy_state(self):
+        self.busy_bar.setVisible(bool(self.tasks))
+        for kind, widgets in (
+            ("ncbi", (self.ncbi_action, self.ncbi_button)),
+            ("restriction", (self.rs_action, self.rs_button)),
+        ):
+            for widget in widgets:
+                widget.setEnabled(kind not in self.tasks)
+
+    def closeEvent(self, event):
+        if self.tasks:
+            # can't interrupt a download midway; wait for it so we exit cleanly
+            self.statusBar().showMessage("Finishing background work before closing...")
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.pool.waitForDone()
+            QApplication.restoreOverrideCursor()
+        super().closeEvent(event)
+
+    # ================================================================ tools
     def require_dna(self, what):
         if self.current_record is None:
             return False
@@ -406,15 +514,25 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
-        circular = st.is_circular(self.current_record)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            sites = st.find_restriction_sites(self.current_sequence, circular=circular)
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Error", f"Restriction analysis failed:\n{exc}")
+        record = self.current_record
+        circular = st.is_circular(record)
+        self.start_task(
+            "restriction", f"Searching restriction sites in {record.id}...",
+            st.find_restriction_sites, self.current_sequence, circular=circular,
+            on_done=lambda sites: self.show_restriction_results(record, circular, sites),
+            on_fail=lambda message: QMessageBox.critical(
+                self, "Error", f"Restriction analysis failed:\n{message}"
+            ),
+        )
+
+    def show_restriction_results(self, record, circular, sites):
+        if record is not self.current_record:
+            # the user switched records while the search was running
+            self.statusBar().showMessage(
+                f"Restriction search for {record.id} finished, but another record "
+                "is selected now. Run it again to see the results.", 8000
+            )
             return
-        QApplication.restoreOverrideCursor()
 
         on_map = st.map_sites(sites)
         self.circular_viewer.set_sites(on_map)
@@ -454,7 +572,17 @@ class MainWindow(QMainWindow):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        dialog.exec()
+
+        # non-modal: the main window stays usable while the list is open
+        if self.sites_dialog is not None:
+            self.sites_dialog.close()
+        self.sites_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.destroyed.connect(self.forget_sites_dialog)
+        dialog.show()
+
+    def forget_sites_dialog(self):
+        self.sites_dialog = None
 
     def copy_seq(self):
         if self.current_record is None:
@@ -488,8 +616,9 @@ class MainWindow(QMainWindow):
     def show_about(self):
         QMessageBox.about(
             self, "About N-Zoom",
-            f"N-Zoom {VERSION}\nAn open-source lightweight sequence viewer by mikeph52.\n2026 GPL v3 licence.",
+            f"N-Zoom {VERSION}\nA lightweight sequence viewer by mikeph52.",
         )
+
 
 def main():
     app = QApplication(sys.argv)
@@ -497,6 +626,7 @@ def main():
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

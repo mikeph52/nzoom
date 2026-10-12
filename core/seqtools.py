@@ -1,13 +1,22 @@
 # N-Zoom seqtools.py by mikeph52, Init 11/10/2026
 # Here there's all the seq features of nzoom.
 
+"""
+seqtools.py — sequence logic for N-Zoom (no GUI code in here).
+
+Type detection, file loading/saving, GenBank feature helpers,
+restriction-site search and NCBI fetching.
+"""
 from pathlib import Path
+
 from Bio import SeqIO, Entrez
 from Bio.Seq import Seq
 
+# ---------------------------------------------------------------- constants
 DNA_CHARS = set("ACGTUNRYKMSWBDHV-")
 PROTEIN_CHARS = set("ABCDEFGHIKLMNPQRSTVWXYZJUO*-")
 MAX_COLORED_LENGTH = 50_000  # above this the sequence view shows plain text
+
 GENBANK_SUFFIXES = {".gb", ".gbk", ".genbank", ".gbff"}
 
 DNA_COLORS = {
@@ -43,14 +52,17 @@ FEATURE_COLORS = {
     "misc_feature": "#757575",
 }
 DEFAULT_FEATURE_COLOR = "#90a4ae"
-SKIP_FEATURE_TYPES = {"source"}  # covers the whole sequence, not useful to draw and makes the app laggyu
+SKIP_FEATURE_TYPES = {"source"}  # covers the whole sequence, not useful to draw
 
+
+# ---------------------------------------------------------------- sequences
 def normalize_seq(seq):
-    # Remove whitespace and force uppercase.
+    """Remove whitespace and force uppercase."""
     return "".join(seq.split()).upper()
 
+
 def detect_seq_type(seq):
-    # Return 'DNA', 'Protein' or 'Unknown'. RNA counts as DNA.
+    """Return 'DNA', 'Protein' or 'Unknown'. RNA counts as DNA."""
     chars = set(normalize_seq(seq))
     if not chars:
         return "Unknown"
@@ -60,45 +72,53 @@ def detect_seq_type(seq):
         return "Protein"
     return "Unknown"
 
+
 def record_sequence(record):
-    # The record's sequence as a clean string
+    """The record's sequence as a clean string ('' if the file has none)."""
     try:
         return normalize_seq(str(record.seq))
-    except Exception:  # e.g. GenBank CONTIG records without sequence data i guess
+    except Exception:  # e.g. GenBank CONTIG records without sequence data
         return ""
 
+
+# ---------------------------------------------------------------- files
 def guess_format(path):
     return "genbank" if Path(path).suffix.lower() in GENBANK_SUFFIXES else "fasta"
 
+
 def load_records(path):
-    # Read every record from a FASTA or GenBank file and returns records and format
+    """Read every record from a FASTA or GenBank file. Returns (records, format)."""
     fmt = guess_format(path)
     return list(SeqIO.parse(path, fmt)), fmt
 
+
 def save_records(records, path, fmt):
-    # Write records as gb or fasta
+    """Write records as 'genbank' or 'fasta'."""
     if fmt == "genbank":
         for record in records:
-            # gb output needs a molecule type unlike FASTA
+            # GenBank output needs a molecule type; FASTA-loaded records lack one
             if "molecule_type" not in record.annotations:
                 is_protein = detect_seq_type(record_sequence(record)) == "Protein"
                 record.annotations["molecule_type"] = "protein" if is_protein else "DNA"
     SeqIO.write(records, path, fmt)
 
 
-# plasmid features
+# ---------------------------------------------------------------- features
 def is_circular(record):
     return str(record.annotations.get("topology", "")).lower() == "circular"
+
 
 def topology(record):
     return str(record.annotations.get("topology", "")).lower() or "unknown"
 
+
 def display_features(record):
-    # Features worth showing
+    """Features worth showing (everything except 'source')."""
     return [
         f for f in record.features
         if f.type not in SKIP_FEATURE_TYPES and f.location is not None
     ]
+
 
 def feature_label(feature):
     for key in ("label", "gene", "product", "locus_tag", "note"):
@@ -107,8 +127,10 @@ def feature_label(feature):
             return str(values[0])
     return feature.type
 
+
 def feature_color(feature):
     return FEATURE_COLORS.get(feature.type, DEFAULT_FEATURE_COLOR)
+
 
 def feature_parts(feature):
     """List of (start, end) — 0-based, end exclusive — one per location part.
@@ -120,12 +142,14 @@ def feature_parts(feature):
         return []
     return [(int(part.start), int(part.end)) for part in feature.location.parts]
 
+
 def feature_strand(feature):
-    # 1, -1, or 0 for unknown / mixed.
+    """1, -1, or 0 for unknown / mixed."""
     strand = feature.location.strand if feature.location is not None else None
     return strand if strand in (1, -1) else 0
 
-# restriction sites finder
+
+# ---------------------------------------------------------------- restriction
 def find_restriction_sites(sequence, circular=True, commercial_only=True):
     """Return {enzyme name: [cut positions]} for every enzyme that cuts.
 
@@ -142,6 +166,7 @@ def find_restriction_sites(sequence, circular=True, commercial_only=True):
         if positions
     }
 
+
 def map_sites(sites, min_site_size=6):
     """Pick the sites worth drawing on a map: enzymes that cut exactly once and
     recognise at least `min_site_size` bases. Enzymes cutting at the same spot
@@ -155,6 +180,7 @@ def map_sites(sites, min_site_size=6):
             by_position.setdefault(positions[0], []).append(name)
     return {", ".join(sorted(names)): [pos] for pos, names in by_position.items()}
 
+
 def feature_span(feature):
     """(start, end) to display, 1-based inclusive, in genome order.
     For a feature crossing the origin start > end, e.g. (2801, 80)."""
@@ -163,9 +189,11 @@ def feature_span(feature):
         parts = parts[::-1]  # reverse-strand parts are stored in biological order
     return parts[0][0] + 1, parts[-1][1]
 
-# fetch from NCBI
+
+# ---------------------------------------------------------------- NCBI
 def fetch_genbank(accession, email):
-    Entrez.email = email  # NCBI requires an e-mail address with each request we will see how to handle that
+    """Download one nucleotide record from NCBI as a GenBank SeqRecord."""
+    Entrez.email = email  # NCBI requires an e-mail address with each request
     with Entrez.efetch(
         db="nuccore", id=accession, rettype="gbwithparts", retmode="text"
     ) as handle:
