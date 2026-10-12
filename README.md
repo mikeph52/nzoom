@@ -7,8 +7,9 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 > [!IMPORTANT]
 > Early alpha (v0.10.1). A first stable release is planned for 2027.
 
-![](docs/gui.png)
+![](docs/gui-1.png)
 
+![](docs/gel.png)
 ---
 
 ## Features
