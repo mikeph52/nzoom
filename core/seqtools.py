@@ -53,6 +53,7 @@ FEATURE_COLORS = {
     "regulatory": "#f4511e",
     "misc_feature": "#757575",
     "ORF": "#9ccc65",        # found by the ORF finder, not saved in the file
+    "read": "#78909c",       # aligned sequencing reads, not saved in the file
 }
 
 # feature types offered in the "Add feature" dialog (any text is allowed too)
@@ -414,6 +415,239 @@ def find_motif(sequence, motif, circular=False, both_strands=True, dna=True, max
                 break
     hits.sort(key=lambda hit: (hit["start"], -hit["strand"]))
     return hits[:max_hits] if max_hits else hits
+
+
+# ---------------------------------------------------------------- sequencing reads
+READ_SUFFIXES = {".ab1": "abi", ".abi": "abi", ".fastq": "fastq", ".fq": "fastq",
+                 ".fasta": "fasta", ".fa": "fasta", ".fas": "fasta", ".fna": "fasta",
+                 ".seq": "text", ".txt": "text"}
+TRIM_ERROR_LIMIT = 0.05      # quality trimming: keep bases better than 5% error
+LOW_QUALITY = 20             # differences at bases below this are flagged
+MIN_ALIGNED = 30             # shorter alignments count as "no match"
+SEED_SIZE = 14               # k-mer size used to locate reads in long sequences
+
+
+def load_read(path):
+    """Read one sequencing read. Returns a dict:
+    name, seq, quals (list or None), trace (dict or None, .ab1 only).
+
+    .ab1/.abi: chromatogram files from ABI sequencers.  .fastq: bases with
+    qualities.  .fasta and .seq/.txt: bases only."""
+    path = Path(path)
+    kind = READ_SUFFIXES.get(path.suffix.lower(), "fasta")
+    name = path.stem
+    if kind == "text":
+        text = path.read_text(errors="replace")
+        lines = [line for line in text.splitlines() if not line.startswith(">")]
+        seq = normalize_seq("".join(lines))
+        return {"name": name, "seq": seq, "quals": None, "trace": None, "path": str(path)}
+    record = SeqIO.read(str(path), kind)
+    quals = record.letter_annotations.get("phred_quality")
+    trace = None
+    if kind == "abi":
+        raw = record.annotations.get("abif_raw", {})
+        order = raw.get("FWO_1", b"GATC")
+        order = order.decode() if isinstance(order, bytes) else str(order)
+        channels = {base: list(raw.get(f"DATA{9 + i}") or ()) for i, base in enumerate(order[:4])}
+        peaks = raw.get("PLOC2") or raw.get("PLOC1")
+        if all(channels.values()) and peaks:
+            trace = {"channels": channels, "peaks": list(peaks)}
+    return {"name": name, "seq": normalize_seq(str(record.seq)),
+            "quals": list(quals) if quals else None, "trace": trace, "path": str(path)}
+
+
+def quality_trim(quals, limit=TRIM_ERROR_LIMIT):
+    """(start, end) of the region worth keeping, by the "modified Mott"
+    method used by phred: each base scores limit - P(error), and the
+    best-scoring stretch is kept. Without qualities, keep everything."""
+    if not quals:
+        return 0, 0
+    best_sum, best = 0.0, (0, 0)
+    running, start = 0.0, 0
+    for i, q in enumerate(quals):
+        running += limit - 10 ** (-q / 10)
+        if running <= 0:
+            running, start = 0.0, i + 1
+        elif running > best_sum:
+            best_sum, best = running, (start, i + 1)
+    return best
+
+
+def _seed_offset(reference, read):
+    """Most common (reference - read) offset of shared k-mers, with its votes."""
+    votes = {}
+    step = max(1, SEED_SIZE // 2)
+    for i in range(0, len(read) - SEED_SIZE + 1, step):
+        kmer = read[i:i + SEED_SIZE]
+        if "N" in kmer:
+            continue
+        j = reference.find(kmer)
+        hits = 0
+        while j != -1 and hits < 20:  # ignore k-mers in highly repetitive sequence
+            votes[j - i] = votes.get(j - i, 0) + 1
+            j = reference.find(kmer, j + 1)
+            hits += 1
+    if not votes:
+        return None, 0
+    offset = max(votes, key=votes.get)
+    return offset, votes[offset]
+
+
+def align_read(reference, read, quals=None, circular=False):
+    """Align a sequencing read to the reference, trying both orientations.
+
+    The read is quality-trimmed first (if it has qualities). Returns a dict
+    describing the best local alignment, or None if the read doesn't match:
+      strand          1 = read runs along the top strand, -1 = reverse
+      start, end      1-based, inclusive, reference coordinates covered
+                      (start > end across the origin of a circular sequence)
+      location        the same as a Biopython location
+      identity        % of alignment columns that match
+      columns, matches
+      differences     list of dicts: kind ("mismatch", "insertion",
+                      "deletion"), ref_pos (1-based), ref, read (bases),
+                      quality (or None), read_index (0-based, in the read as
+                      sequenced), low_quality (True if quality < 20)
+      rows            (reference row, match row, read row, first ref
+                      position) for printing the alignment
+      trim            (start, end) of the read that was used
+    """
+    from Bio import Align
+
+    reference = normalize_seq(reference).replace("U", "T")
+    read = normalize_seq(read).replace("U", "T")
+    length = len(reference)
+    trim_start, trim_end = quality_trim(quals) if quals else (0, len(read))
+    if trim_end - trim_start < MIN_ALIGNED:
+        return None
+    used = read[trim_start:trim_end]
+    used_quals = quals[trim_start:trim_end] if quals else None
+
+    target = reference + reference[:len(used)] if circular else reference
+    aligner = Align.PairwiseAligner(mode="local", match_score=2, mismatch_score=-3,
+                                    open_gap_score=-5, extend_gap_score=-2)
+    best = None
+    for strand, query in ((1, used), (-1, reverse_complement(used))):
+        window_start = 0
+        window = target
+        if len(target) > 50_000:  # long references: align only near the k-mer hits
+            offset, votes = _seed_offset(target, query)
+            if offset is None or votes < 2:
+                continue
+            window_start = max(0, offset - 500)
+            window = target[window_start:offset + len(query) + 500]
+        score = aligner.score(window, query)
+        if best is None or score > best[0]:
+            best = (score, strand, query, window, window_start)
+    if best is None or best[0] <= 0:
+        return None
+    score, strand, query, window, window_start = best
+    alignment = aligner.align(window, query)[0]
+
+    # walk the alignment block by block
+    oriented_quals = (used_quals if strand == 1 else used_quals[::-1]) if used_quals else None
+
+    def read_index(q):  # position in the read as the sequencer produced it
+        return trim_start + q if strand == 1 else trim_end - 1 - q
+
+    def quality(q):
+        return oriented_quals[q] if oriented_quals else None
+
+    coords = alignment.coordinates
+    ref_row, read_row, mid_row = [], [], []
+    differences = []
+    matches = columns = 0
+    for k in range(coords.shape[1] - 1):
+        t0, t1 = int(coords[0][k]), int(coords[0][k + 1])
+        q0, q1 = int(coords[1][k]), int(coords[1][k + 1])
+        if t1 > t0 and q1 > q0:  # aligned block
+            for t, q in zip(range(t0, t1), range(q0, q1)):
+                r_base, q_base = window[t], query[q]
+                columns += 1
+                ref_row.append(r_base)
+                read_row.append(q_base)
+                if r_base == q_base:
+                    matches += 1
+                    mid_row.append("|")
+                else:
+                    mid_row.append(" ")
+                    differences.append({
+                        "kind": "mismatch", "ref_pos": (window_start + t) % length + 1,
+                        "ref": r_base, "read": q_base, "quality": quality(q),
+                        "read_index": read_index(q)})
+        elif t1 > t0:  # bases missing from the read
+            columns += t1 - t0
+            ref_row.append(window[t0:t1])
+            read_row.append("-" * (t1 - t0))
+            mid_row.append(" " * (t1 - t0))
+            neighbours = [x for x in (quality(q0 - 1) if q0 > 0 else None,
+                                      quality(q0) if q0 < len(query) else None) if x is not None]
+            differences.append({
+                "kind": "deletion", "ref_pos": (window_start + t0) % length + 1,
+                "ref": window[t0:t1], "read": "-", "quality": min(neighbours) if neighbours else None,
+                "read_index": read_index(min(q0, len(query) - 1))})
+        elif q1 > q0:  # extra bases in the read
+            columns += q1 - q0
+            ref_row.append("-" * (q1 - q0))
+            read_row.append(query[q0:q1])
+            mid_row.append(" " * (q1 - q0))
+            qs = [quality(q) for q in range(q0, q1) if quality(q) is not None]
+            differences.append({
+                "kind": "insertion", "ref_pos": (window_start + t0 - 1) % length + 1,
+                "ref": "-", "read": query[q0:q1], "quality": min(qs) if qs else None,
+                "read_index": read_index(q0)})
+    for difference in differences:
+        q = difference["quality"]
+        difference["low_quality"] = q is not None and q < LOW_QUALITY
+
+    if columns < MIN_ALIGNED:
+        return None
+    first = int(coords[0][0]) + window_start
+    last = int(coords[0][-1]) + window_start  # exclusive
+    start1 = first % length + 1
+    end1 = (last - 1) % length + 1
+    return {
+        "strand": strand, "start": start1, "end": end1,
+        "location": make_location(start1, end1, strand, length, circular),
+        "identity": 100.0 * matches / columns, "columns": columns, "matches": matches,
+        "differences": differences, "score": score,
+        "rows": ("".join(ref_row), "".join(mid_row), "".join(read_row), start1),
+        "trim": (trim_start, trim_end),
+    }
+
+
+def align_reads(reference, paths, circular=False):
+    """Load and align several read files. Each result is load_read()'s dict
+    plus "alignment" (align_read's dict, or None) and "error" (or None)."""
+    results = []
+    for path in paths:
+        try:
+            read = load_read(path)
+        except Exception as exc:  # unreadable file: report it, carry on with the rest
+            results.append({"name": Path(path).stem, "seq": "", "quals": None, "trace": None,
+                            "path": str(path), "alignment": None,
+                            "error": f"Could not read file: {exc}"})
+            continue
+        read["alignment"] = align_read(reference, read["seq"], read["quals"], circular)
+        read["error"] = None if read["alignment"] else "No match to this sequence"
+        results.append(read)
+    return results
+
+
+def format_alignment(rows, width=60):
+    """Alignment as text blocks with reference positions, like BLAST output."""
+    ref_row, mid_row, read_row, first = rows
+    lines = []
+    position = first
+    for i in range(0, len(ref_row), width):
+        ref_part = ref_row[i:i + width]
+        bases = sum(1 for c in ref_part if c != "-")
+        lines.append(f"Ref  {position:>7,}  {ref_part}  {position + bases - 1:,}")
+        lines.append(f"     {'':>7}  {mid_row[i:i + width]}")
+        lines.append(f"Read {'':>7}  {read_row[i:i + width]}")
+        lines.append("")
+        position += bases
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- primers
