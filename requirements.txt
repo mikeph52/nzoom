@@ -1,2 +1,8 @@
-PySide6>=6.7
 biopython>=1.83
+
+# PySide6 6.12.0 has a bug on Python 3.10/3.11 that crashes the app (it frees
+# Python's None object). Python 3.12+ is not affected. Remove the upper limit
+# once a fixed PySide6 release is out (tests/test_environment.py checks this).
+
+PySide6>=6.7,<6.12; python_version < "3.12"
+PySide6>=6.7; python_version >= "3.12"
