@@ -1,5 +1,3 @@
-# N-Zoom seqtools.py by mikeph52, Init 11/10/2026
-# Here there's all the seq features of nzoom.
 """
 seqtools.py — sequence logic for N-Zoom (no GUI code in here).
 
@@ -348,6 +346,74 @@ def find_orfs(sequence, min_aa=DEFAULT_MIN_ORF_AA, circular=False, table=1):
     for number, orf in enumerate(orfs, 1):
         orf.qualifiers["label"] = [f"ORF{number} ({orf.qualifiers['aa'][0]} aa)"]
     return orfs
+
+
+# ---------------------------------------------------------------- motif search
+IUPAC_PATTERNS = {
+    "A": "A", "C": "C", "G": "G", "T": "T",
+    "R": "[AG]", "Y": "[CT]", "S": "[CG]", "W": "[AT]", "K": "[GT]", "M": "[AC]",
+    "B": "[CGT]", "D": "[AGT]", "H": "[ACT]", "V": "[ACG]", "N": "[ACGT]",
+}
+
+
+def motif_pattern(motif, dna=True):
+    """Regular expression for a search motif.
+    DNA: IUPAC codes allowed (N = any base). Protein: letters, X = any residue."""
+    if dna:
+        bad = sorted(set(motif) - set(IUPAC_PATTERNS))
+        if bad:
+            raise ValueError(f"Not a DNA letter or IUPAC code: {', '.join(bad)}")
+        return "".join(IUPAC_PATTERNS[c] for c in motif)
+    bad = sorted(set(motif) - set(PROTEIN_CHARS) - {"X"})
+    if bad:
+        raise ValueError(f"Not an amino-acid letter: {', '.join(bad)}")
+    return "".join("." if c == "X" else re.escape(c) for c in motif)
+
+
+def find_motif(sequence, motif, circular=False, both_strands=True, dna=True, max_hits=None):
+    """Every occurrence of `motif`, including overlapping ones.
+
+    DNA motifs may use IUPAC codes and are searched on both strands (unless
+    both_strands is False); a palindromic motif such as GAATTC is reported
+    once per site, with strand 0. On circular sequences matches may run over
+    the origin. Protein motifs are searched as text, with X matching anything.
+
+    Returns a list of dicts sorted by position: strand (1, -1 or 0),
+    start, end (1-based, inclusive; start > end across the origin), location.
+    """
+    motif = normalize_seq(motif)
+    if dna:
+        motif = motif.replace("U", "T")
+    template = normalize_seq(sequence)
+    if dna:
+        template = template.replace("U", "T")
+    length, size = len(template), len(motif)
+    if not motif or size > length:
+        return []
+
+    searches = [(1, motif)]
+    if dna and both_strands:
+        reverse = reverse_complement(motif)  # Biopython complements IUPAC codes too
+        if reverse == motif:
+            searches = [(0, motif)]  # palindrome: same sites on both strands
+        else:
+            searches.append((-1, reverse))
+    searchable = template + template[:size - 1] if circular else template
+
+    hits = []
+    for strand, pattern_motif in searches:
+        regex = re.compile(f"(?=({motif_pattern(pattern_motif, dna)}))")
+        for match in regex.finditer(searchable):
+            i = match.start()
+            if i >= length:
+                break
+            start1, end1 = i + 1, (i + size - 1) % length + 1
+            hits.append({"strand": strand, "start": start1, "end": end1,
+                         "location": make_location(start1, end1, strand, length, circular)})
+            if max_hits and len(hits) >= max_hits:
+                break
+    hits.sort(key=lambda hit: (hit["start"], -hit["strand"]))
+    return hits[:max_hits] if max_hits else hits
 
 
 # ---------------------------------------------------------------- primers

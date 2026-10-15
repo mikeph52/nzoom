@@ -7,10 +7,13 @@ from collections import Counter
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction, QActionGroup, QFont, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QAction, QActionGroup, QFont, QGuiApplication, QKeySequence, QShortcut, QUndoStack,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -30,6 +34,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -38,12 +43,14 @@ from core import seqtools as st
 from core import theme
 from core.dialogs import FeatureDialog, RestrictionSitesDialog, TextResultDialog, number_item
 from core.digest import DigestDialog
-from core.maps import CircularDNAViewer, LinearDNAViewer, MapGroup
+from core.maps import CircularDNAViewer, LinearDNAViewer, LinearMapPanel, MapGroup, export_image
 from core.primers import PrimerDialog
+from core.undo import AddFeatures, DeleteFeature, EditFeature, snapshot
 from core.viewers import SequenceViewer
 from core.workers import Task
 
-VERSION = "0.11.1"
+VERSION = "0.12.1"
+MAX_FIND_HITS = 5000  # Find stops counting after this many matches
 MAP_MODES = [("auto", "Automatic (from topology)"), ("circular", "Circular"), ("linear", "Linear")]
 THEME_NAMES = {"system": "Same as system", "light": "Light", "dark": "Dark"}
 
@@ -75,7 +82,14 @@ class MainWindow(QMainWindow):
         # file state
         self.current_path = None     # where Save writes to
         self.current_format = None   # "genbank" or "fasta"
-        self.modified = False
+        # unsaved changes: feature edits live on the undo stack (undoing back to
+        # the last save makes the file "unmodified" again); records fetched from
+        # NCBI aren't undoable, so they set a separate flag
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.cleanChanged.connect(self.on_clean_changed)
+        self.unsaved_records = False
+        self.find_hits = []
+        self.find_index = -1
 
         # background work (NCBI downloads, restriction searches, ORF finding)
         self.pool = QThreadPool(self)
@@ -106,9 +120,25 @@ class MainWindow(QMainWindow):
         self.add_action(file_menu, "Save", self.save, "Ctrl+S")
         self.add_action(file_menu, "Save As...", self.save_as, "Ctrl+Shift+S")
         file_menu.addSeparator()
+        self.add_action(file_menu, "Export map image...", self.export_map, "Ctrl+Shift+E")
+        file_menu.addSeparator()
         self.add_action(file_menu, "Exit", self.close, "Ctrl+Q")
 
         edit_menu = self.menuBar().addMenu("Edit")
+        undo_action = self.undo_stack.createUndoAction(self, "Undo")
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        redo_action = self.undo_stack.createRedoAction(self, "Redo")
+        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        edit_menu.addAction(undo_action)
+        edit_menu.addAction(redo_action)
+        edit_menu.addSeparator()
+        find_action = self.add_action(edit_menu, "Find sequence...", self.show_find)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        next_action = self.add_action(edit_menu, "Find next", self.find_next)
+        next_action.setShortcut(QKeySequence.StandardKey.FindNext)
+        previous_action = self.add_action(edit_menu, "Find previous", self.find_previous)
+        previous_action.setShortcut(QKeySequence.StandardKey.FindPrevious)
+        edit_menu.addSeparator()
         self.add_action(edit_menu, "Add feature...", self.add_feature, "Ctrl+E")
         self.add_action(edit_menu, "Edit selected feature...", self.edit_selected_feature)
         self.add_action(edit_menu, "Delete selected feature", self.delete_selected_feature)
@@ -189,6 +219,8 @@ class MainWindow(QMainWindow):
         title_font.setPointSize(13)
         self.sequence_title.setFont(title_font)
         center_layout.addWidget(self.sequence_title)
+        self.find_bar = self.build_find_bar()
+        center_layout.addWidget(self.find_bar)
 
         center_split = QSplitter(Qt.Orientation.Vertical)
 
@@ -197,11 +229,13 @@ class MainWindow(QMainWindow):
         self.circular_viewer = CircularDNAViewer()
         self.linear_viewer = LinearDNAViewer()
         self.maps = MapGroup(self.circular_viewer, self.linear_viewer)
+        self.linear_panel = LinearMapPanel(self.linear_viewer)  # adds scrollbar + zoom buttons
         self.map_stack = QStackedWidget()
         for view in (self.circular_viewer, self.linear_viewer):
             view.featureClicked.connect(self.select_feature_row)
             view.featureContextMenu.connect(self.map_context_menu)
-            self.map_stack.addWidget(view)
+        self.map_stack.addWidget(self.circular_viewer)
+        self.map_stack.addWidget(self.linear_panel)
         self.view_tabs.addTab(self.map_stack, "Map")
         self.viewer = SequenceViewer()
         self.viewer.selectionInfo.connect(self.on_sequence_selection)
@@ -305,8 +339,21 @@ class MainWindow(QMainWindow):
             name = "No file"
         self.setWindowTitle(f"N-Zoom {VERSION} — {name}{' *' if self.modified else ''}")
 
+    @property
+    def modified(self):
+        return self.unsaved_records or not self.undo_stack.isClean()
+
+    @modified.setter
+    def modified(self, value):
+        self.unsaved_records = bool(value)
+        if not value:
+            self.undo_stack.setClean()
+        self.update_title()
+
     def set_modified(self, modified=True):
         self.modified = modified
+
+    def on_clean_changed(self, _clean):
         self.update_title()
 
     def confirm_discard_changes(self):
@@ -345,6 +392,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_path, self.current_format = path, fmt
+        self.undo_stack.clear()  # old commands refer to the records being closed
         self.show_records(records)
         self.file_label.setText(str(Path(path)))
         self.set_modified(False)
@@ -475,7 +523,7 @@ class MainWindow(QMainWindow):
 
         # map only makes sense for DNA
         if seq_type == "DNA":
-            self.maps.set_record(len(sequence), record.id, self.items)
+            self.maps.set_record(len(sequence), record.id, self.items, sequence=sequence)
             self.view_tabs.setTabEnabled(0, True)
         else:
             self.maps.clear_seq()
@@ -498,6 +546,8 @@ class MainWindow(QMainWindow):
             self.gc_value.setText("N/A")
         composition = ", ".join(f"{base}: {count:,}" for base, count in counts.most_common(12))
         self.composition_value.setText(composition or "-")
+        if self.find_bar.isVisible():
+            self.run_find()
 
     def update_feature_count(self):
         text = str(len(self.current_features))
@@ -748,8 +798,9 @@ class MainWindow(QMainWindow):
             return None
         values = dialog.values()
         feature = st.new_feature(values["type"], values["name"], values["location"], values["note"])
-        self.current_record.features.append(feature)
-        self.after_feature_change(feature, f"Added {values['type']} “{st.feature_label(feature)}”")
+        self.undo_stack.push(AddFeatures(
+            self.current_record, [feature], self.on_features_changed,
+            f"Add {feature.type} \u201c{st.feature_label(feature)}\u201d"))
         return feature
 
     def add_orf_as_feature(self, index):
@@ -776,9 +827,11 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
+        before = snapshot(feature)
         st.update_feature(feature, values["type"], values["name"],
                           location=values["location"], note=values["note"])
-        self.after_feature_change(feature, f"Updated “{st.feature_label(feature)}”")
+        self.undo_stack.push(EditFeature(self.current_record, feature, before, snapshot(feature),
+                                         self.on_features_changed))
 
     def delete_item(self, index):
         if index < 0 or index >= len(self.items) or self.is_orf(index):
@@ -790,16 +843,20 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        features = self.current_record.features
-        for position, candidate in enumerate(features):
-            if candidate is feature:  # by identity: two features can look identical
-                del features[position]
-                break
-        self.after_feature_change(None, f"Deleted “{st.feature_label(feature)}”")
+        self.undo_stack.push(DeleteFeature(self.current_record, feature, self.on_features_changed))
 
-    def after_feature_change(self, feature, message):
-        self.set_modified()
+    def on_features_changed(self, record, feature, message):
+        """Called by every undo command after it changes a record's features."""
+        if record is not self.current_record:
+            # undoing a change to another record: show that record first
+            for index, candidate in enumerate(self.records):
+                if candidate is record:
+                    self.sequence_list.setCurrentRow(index)
+                    break
+            else:
+                return  # the record is no longer open
         self.refresh_features(select=feature)
+        self.update_title()
         self.statusBar().showMessage(message, 5000)
 
     def edit_selected_feature(self):
@@ -990,6 +1047,135 @@ class MainWindow(QMainWindow):
         self.current_orfs = []
         self.refresh_features()
 
+    # ================================================================ find
+    def build_find_bar(self):
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Find:"))
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText("Sequence to find, e.g. GGATCC (IUPAC codes like N, R, Y allowed)")
+        self.find_edit.textChanged.connect(self.run_find)
+        self.find_edit.returnPressed.connect(self.find_next)
+        layout.addWidget(self.find_edit, 1)
+        self.find_both = QCheckBox("Both strands")
+        self.find_both.setChecked(True)
+        self.find_both.toggled.connect(self.run_find)
+        layout.addWidget(self.find_both)
+        self.find_status = QLabel("")
+        self.find_status.setMinimumWidth(170)
+        layout.addWidget(self.find_status)
+        for text, tip, slot in (("\u25b2", "Previous match (Shift+Enter)", self.find_previous),
+                                ("\u25bc", "Next match (Enter)", self.find_next),
+                                ("\u2715", "Close (Esc)", self.hide_find)):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            layout.addWidget(button)
+        close = QShortcut(QKeySequence(Qt.Key.Key_Escape), bar)
+        close.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        close.activated.connect(self.hide_find)
+        previous = QShortcut(QKeySequence("Shift+Return"), self.find_edit)
+        previous.setContext(Qt.ShortcutContext.WidgetShortcut)
+        previous.activated.connect(self.find_previous)
+        bar.hide()
+        return bar
+
+    def show_find(self):
+        if not self.current_sequence:
+            return
+        # start from the selected bases, if a short stretch is selected
+        selection = self.viewer.selected_range()
+        if selection and 0 < selection[1] - selection[0] <= 100:
+            self.find_edit.setText(self.current_sequence[selection[0]:selection[1]])
+        self.find_bar.show()
+        self.find_edit.setFocus()
+        self.find_edit.selectAll()
+        self.run_find()
+
+    def hide_find(self):
+        self.find_bar.hide()
+        self.find_hits, self.find_index = [], -1
+        self.viewer.set_matches([])
+        self.maps.set_marks([])
+        self.viewer.setFocus()
+
+    def run_find(self):
+        if not self.find_bar.isVisible() or not self.current_sequence:
+            return
+        text = self.find_edit.text()
+        dna = self.is_dna()
+        self.find_both.setEnabled(dna)
+        self.find_hits, self.find_index = [], -1
+        error = None
+        if text.strip():
+            try:
+                self.find_hits = st.find_motif(
+                    self.current_sequence, text, circular=st.is_circular(self.current_record),
+                    both_strands=self.find_both.isChecked(), dna=dna, max_hits=MAX_FIND_HITS)
+            except ValueError as exc:
+                error = str(exc)
+        parts = [(int(p.start), int(p.end)) for hit in self.find_hits for p in hit["location"].parts]
+        self.viewer.set_matches(parts[:2000])  # highlighting is slow beyond this
+        self.maps.set_marks(parts)
+        if error:
+            self.find_status.setText(f"<span style='color:#e53935'>{error}</span>")
+        elif not text.strip():
+            self.find_status.setText("")
+        elif not self.find_hits:
+            self.find_status.setText("No matches")
+        else:
+            self.go_to_match(0)
+
+    def go_to_match(self, index):
+        hits = self.find_hits
+        if not hits:
+            return
+        self.find_index = index % len(hits)
+        hit = hits[self.find_index]
+        parts = [(int(p.start), int(p.end)) for p in hit["location"].parts]
+        self.viewer.select_range(*max(parts, key=lambda p: p[1] - p[0]))
+        count = f"{len(hits):,}{'+' if len(hits) >= MAX_FIND_HITS else ''}"
+        strand = {1: "", -1: ", reverse strand", 0: ""}[hit["strand"]]
+        self.find_status.setText(f"{self.find_index + 1:,} of {count}{strand}")
+
+    def find_next(self):
+        if not self.find_bar.isVisible():
+            self.show_find()
+        elif self.find_hits:
+            self.go_to_match(self.find_index + 1)
+
+    def find_previous(self):
+        if self.find_hits:
+            self.go_to_match(self.find_index - 1)
+
+    # ================================================================ export
+    def current_map_view(self):
+        if self.map_stack.currentWidget() is self.circular_viewer:
+            return self.circular_viewer
+        return self.linear_viewer
+
+    def export_map(self):
+        if not self.maps.length:
+            QMessageBox.information(self, "No map", "Open a DNA sequence to export its map.")
+            return
+        name = f"{self.current_record.id}-map.png"
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export map image", name, "PNG image (*.png);;SVG image (*.svg)")
+        if not path:
+            return
+        fmt = "svg" if path.lower().endswith(".svg") or (
+            chosen.startswith("SVG") and not path.lower().endswith(".png")) else "png"
+        if not path.lower().endswith("." + fmt):
+            path += "." + fmt
+        try:
+            export_image(self.current_map_view(), path, fmt, title=self.current_record.id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Could not export the map:\n{exc}")
+            return
+        self.statusBar().showMessage(f"Map saved to {path}", 5000)
+
     # ================================================================ primers
     def open_primer_dialog(self):
         if not self.require_dna("Primer search"):
@@ -998,11 +1184,11 @@ class MainWindow(QMainWindow):
                      on_add=self.add_primer_features).exec()
 
     def add_primer_features(self, features):
-        self.current_record.features.extend(features)
         count = len(features)
-        self.after_feature_change(
-            features[0], f"Added {count} primer site{'s' if count != 1 else ''} "
-                         f"\u201c{st.feature_label(features[0])}\u201d")
+        self.undo_stack.push(AddFeatures(
+            self.current_record, features, self.on_features_changed,
+            f"Add {count} primer site{'s' if count != 1 else ''} "
+            f"\u201c{st.feature_label(features[0])}\u201d"))
 
     # ================================================================ digest
     def open_digest(self):
@@ -1040,7 +1226,7 @@ class MainWindow(QMainWindow):
             circular = False
         else:
             circular = record is None or st.is_circular(record)
-        self.map_stack.setCurrentWidget(self.circular_viewer if circular else self.linear_viewer)
+        self.map_stack.setCurrentWidget(self.circular_viewer if circular else self.linear_panel)
 
     def set_map_mode(self, mode):
         self.map_mode = mode

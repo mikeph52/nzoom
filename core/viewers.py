@@ -1,8 +1,6 @@
 """
-N-Zoom seqtools.py by mikeph52, Init 11/10/2026
-All view functions:
-- SequenceViewer      colored text view of the sequence, can highlight regions
-- CircularDNAViewer   plasmid map with features, ticks and restriction sites
+viewers.py — the Sequence view: colored text of the sequence, with selection
+and feature highlighting. (The maps are in maps.py.)
 """
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
@@ -30,7 +28,8 @@ class SequenceViewer(QTextEdit):
         self.cursorPositionChanged.connect(self._emit_selection)
         self._sequence = ""
         self._seq_type = "Unknown"
-        self._highlighted_parts = []
+        self._highlighted_parts = []   # selected feature
+        self._match_parts = []         # Find matches
 
         font = QFont("Monospace")
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -41,6 +40,7 @@ class SequenceViewer(QTextEdit):
         self._sequence = normalize_seq(sequence)
         self._seq_type = seq_type
         self._highlighted_parts = []
+        self._match_parts = []
         self._render()
         self._move_to(0)
 
@@ -48,10 +48,8 @@ class SequenceViewer(QTextEdit):
         """Re-color the text for the current theme, keeping cursor and highlight."""
         cursor = self.textCursor()
         anchor, position = cursor.anchor(), cursor.position()
-        parts = self._highlighted_parts
         self._render()
-        if parts:
-            self.highlight_parts(parts)
+        self._apply_highlights()
         restored = QTextCursor(self.document())
         restored.setPosition(anchor)
         restored.setPosition(position, QTextCursor.MoveMode.KeepAnchor)
@@ -81,29 +79,40 @@ class SequenceViewer(QTextEdit):
             i = j
         cursor.endEditBlock()
 
-    def highlight_parts(self, parts, color=None):
-        """Give each (start, end) region a background color and scroll to it."""
+    def highlight_parts(self, parts):
+        """Highlight a feature's (start, end) regions and scroll to it."""
         self._highlighted_parts = list(parts)
-        color = color or theme.current().feature_highlight
-        last = max(0, self.document().characterCount() - 1)
-        selections = []
-        for start, end in parts:
-            cursor = QTextCursor(self.document())
-            cursor.setPosition(min(max(start, 0), last))
-            cursor.setPosition(min(max(end, 0), last), QTextCursor.MoveMode.KeepAnchor)
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor(color))
-            selection = QTextEdit.ExtraSelection()
-            selection.cursor = cursor
-            selection.format = fmt
-            selections.append(selection)
-        self.setExtraSelections(selections)
+        self._apply_highlights()
         if parts:
             self._move_to(parts[0][0])
 
     def clear_highlight(self):
         self._highlighted_parts = []
-        self.setExtraSelections([])
+        self._apply_highlights()
+
+    def set_matches(self, parts):
+        """Highlight Find matches (list of (start, end)) without scrolling."""
+        self._match_parts = list(parts)
+        self._apply_highlights()
+
+    def _apply_highlights(self):
+        colors = theme.current()
+        last = max(0, self.document().characterCount() - 1)
+        selections = []
+        # matches first, so a selected feature is drawn on top of them
+        for parts, color in ((self._match_parts, colors.match_highlight),
+                             (self._highlighted_parts, colors.feature_highlight)):
+            for start, end in parts:
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(min(max(start, 0), last))
+                cursor.setPosition(min(max(end, 0), last), QTextCursor.MoveMode.KeepAnchor)
+                fmt = QTextCharFormat()
+                fmt.setBackground(QColor(color))
+                selection = QTextEdit.ExtraSelection()
+                selection.cursor = cursor
+                selection.format = fmt
+                selections.append(selection)
+        self.setExtraSelections(selections)
 
     def select_range(self, start, end):
         """Select start..end (0-based, end exclusive) and scroll to it."""

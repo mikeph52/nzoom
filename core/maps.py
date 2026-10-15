@@ -10,15 +10,16 @@ Positions are 0-based and end-exclusive everywhere in this file.
 """
 import math
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QHBoxLayout, QScrollBar, QToolButton, QVBoxLayout, QWidget
 
 from . import theme
 from .seqtools import feature_color, feature_label, feature_parts, feature_strand
 
 MAX_LANES = 4        # feature rows per strand before features start to stack
 MAX_LABELS = 300     # skip labels on very busy maps (e.g. whole genomes)
+MAX_MARKS = 2000     # Find matches drawn on a map at most
 
 
 def _overlaps(a, b):
@@ -57,17 +58,26 @@ class MapView(QWidget):
         self.sites = {}
         self.selected = -1
         self.highlight = None  # (start, end) of the text selection, or None
+        self.sequence = ""     # the bases (the linear map shows them when zoomed in)
+        self.marks = []        # Find matches: list of (start, end)
         self._lanes = {}
 
     # ---------------------------------------------------------- public API
-    def set_record(self, length, title, features=None):
+    def set_record(self, length, title, features=None, sequence=""):
         self.length = length
         self.title = title
+        self.sequence = sequence
         self.features = list(features or [])
         self.sites = {}
+        self.marks = []
         self.selected = -1
         self.highlight = None
         self._lanes = self._assign_lanes()
+        self.update()
+
+    def set_marks(self, parts):
+        """Mark Find matches; parts is a list of (start, end)."""
+        self.marks = list(parts)[:MAX_MARKS]
         self.update()
 
     def set_features(self, features):
@@ -220,6 +230,13 @@ class CircularDNAViewer(MapView):
 
         self._draw_ticks(painter, radius, inner_r - 14)
 
+        # Find matches: short ticks across the backbone
+        if self.marks:
+            painter.setPen(QPen(QColor(colors.match), 3))
+            for start, end in self.marks:
+                mid = (start + end) / 2
+                painter.drawLine(self._point(mid, radius - 6), self._point(mid, radius + 6))
+
         # features: forward strand outside the backbone, reverse inside
         labels = []
         self._hit_regions = []
@@ -358,17 +375,149 @@ class CircularDNAViewer(MapView):
 SIDE_MARGIN = 50     # pixels left/right of the bar
 ROW_GAP = 14         # pixels between feature rows
 BAR_HEIGHT = 9       # height of a feature bar (ORFs are thinner)
+MAX_PX_PER_BP = 16   # zoom limit: pixels per base pair
+LETTERS_PX_PER_BP = 7  # show the bases once each one gets this many pixels
 
 
 class LinearDNAViewer(MapView):
+    """Horizontal map. Mouse wheel zooms around the pointer; Shift+wheel,
+    a sideways wheel, or dragging the background scrolls."""
+    viewChanged = Signal()  # zoom or scroll position changed
+
     def __init__(self):
         super().__init__()
         self._hit_rects = []  # (index, QRectF)
+        self.zoom = 1.0       # 1 = whole sequence fits the width
+        self.view_start = 0.0 # first visible position (bp)
+        self._drag = None     # (mouse x, view_start) while dragging
         self.setMinimumSize(450, 300)
 
+    # ---------------------------------------------------------- view
+    def set_record(self, length, title, features=None, sequence=""):
+        self.zoom, self.view_start = 1.0, 0.0
+        super().set_record(length, title, features, sequence)
+        self.viewChanged.emit()
+
+    def _usable(self):
+        return max(1, self.width() - 2 * SIDE_MARGIN)
+
+    def visible_span(self):
+        return self.length / self.zoom if self.length else 0
+
+    def px_per_bp(self):
+        return self._usable() / self.visible_span() if self.length else 0
+
+    def max_zoom(self):
+        return max(1.0, MAX_PX_PER_BP * self.length / self._usable())
+
     def _x(self, position):
-        usable = max(1, self.width() - 2 * SIDE_MARGIN)
-        return SIDE_MARGIN + position / self.length * usable
+        return SIDE_MARGIN + (position - self.view_start) * self.px_per_bp()
+
+    def _pos_at(self, x):
+        return self.view_start + (x - SIDE_MARGIN) / self.px_per_bp()
+
+    def set_view_start(self, start):
+        if not self.length:
+            return
+        start = min(max(float(start), 0.0), self.length - self.visible_span())
+        if start != self.view_start:
+            self.view_start = start
+            self.update()
+            self.viewChanged.emit()
+
+    def set_zoom(self, zoom, anchor_x=None):
+        """Zoom, keeping the base under anchor_x (default: the centre) in place."""
+        if not self.length:
+            return
+        if anchor_x is None:
+            anchor_x = SIDE_MARGIN + self._usable() / 2
+        anchor_pos = self._pos_at(anchor_x)
+        self.zoom = min(max(zoom, 1.0), self.max_zoom())
+        self.view_start = anchor_pos - (anchor_x - SIDE_MARGIN) / self.px_per_bp()
+        self.view_start = min(max(self.view_start, 0.0), self.length - self.visible_span())
+        self.update()
+        self.viewChanged.emit()
+
+    def zoom_by(self, factor, anchor_x=None):
+        self.set_zoom(self.zoom * factor, anchor_x)
+
+    def fit(self):
+        self.zoom, self.view_start = 1.0, 0.0
+        self.update()
+        self.viewChanged.emit()
+
+    def ensure_visible(self, start, end):
+        """Scroll (not zoom) so start..end is on screen, if it isn't already."""
+        if not self.length or self.zoom <= 1.0:
+            return
+        span = self.visible_span()
+        if start >= self.view_start and end <= self.view_start + span:
+            return
+        if end - start >= span:
+            self.set_view_start(start)
+        else:
+            self.set_view_start((start + end) / 2 - span / 2)
+
+    def set_selected(self, index):
+        super().set_selected(index)
+        if 0 <= index < len(self.features):
+            parts = feature_parts(self.features[index])
+            self.ensure_visible(min(s for s, _ in parts), max(e for _, e in parts))
+
+    def set_highlight(self, start=None, end=None):
+        super().set_highlight(start, end)
+        if self.highlight:
+            self.ensure_visible(*self.highlight)
+
+    # ---------------------------------------------------------- mouse
+    def wheelEvent(self, event):
+        if not self.length:
+            return
+        dx, dy = event.angleDelta().x(), event.angleDelta().y()
+        if dx or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            steps = (dx or dy) / 120
+            self.set_view_start(self.view_start - steps * self.visible_span() * 0.15)
+        elif dy:
+            self.zoom_by(1.25 ** (dy / 120), event.position().x())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.feature_at(event.position())
+            if index >= 0:
+                self.featureClicked.emit(index)
+                return
+            if self.zoom > 1.0:  # drag the background to scroll
+                self._drag = (event.position().x(), self.view_start)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag:
+            x0, start0 = self._drag
+            self.set_view_start(start0 - (event.position().x() - x0) / self.px_per_bp())
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag:
+            self._drag = None
+            self.unsetCursor()
+            return
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.zoom = min(self.zoom, self.max_zoom())
+        self.viewChanged.emit()
+
+    # ---------------------------------------------------------- painting
+    def _edges(self):
+        return SIDE_MARGIN - 8.0, self.width() - SIDE_MARGIN + 8.0
+
+    def _visible(self, start, end):
+        return end >= self.view_start and start <= self.view_start + self.visible_span()
 
     def paintEvent(self, event):
         painter = self._begin_paint("No DNA loaded")
@@ -377,29 +526,47 @@ class LinearDNAViewer(MapView):
         colors = theme.current()
         fwd_rows = self._lane_count(True)
         rev_rows = self._lane_count(False)
+        letters = self.px_per_bp() >= LETTERS_PX_PER_BP and bool(self.sequence)
+        first_row = 26 if letters else 14  # rows move out to make room for the bases
 
-        # vertical layout: labels / forward rows / bar / reverse rows / ticks / labels
         bar_y = self.height() / 2 + (fwd_rows - rev_rows) * ROW_GAP / 2
-        x0, x1 = self._x(0), self._x(self.length)
+        x0 = max(self._x(0), SIDE_MARGIN - 8)
+        x1 = min(self._x(self.length), self.width() - SIDE_MARGIN + 8)
 
         self._draw_title(painter)
+        # when zoomed, everything but the labels stays inside the map area
+        left_edge, right_edge = self._edges()
+        painter.setClipRect(QRectF(left_edge, 0, right_edge - left_edge, self.height()))
 
-        # selected region from the Sequence tab
-        if self.highlight:
+        if self.highlight and self._visible(*self.highlight):
             start, end = self.highlight
             left, right = self._x(start), self._x(end)
             painter.fillRect(QRectF(left, bar_y - 9, max(right - left, 2), 18),
                              QColor(*colors.highlight))
 
-        # backbone with end caps
+        # backbone; end marks only where the sequence really ends
         painter.setPen(QPen(QColor(colors.backbone), 3))
         painter.drawLine(QPointF(x0, bar_y), QPointF(x1, bar_y))
         painter.setPen(QPen(QColor(colors.backbone), 2))
-        for x in (x0, x1):
-            painter.drawLine(QPointF(x, bar_y - 6), QPointF(x, bar_y + 6))
+        for pos in (0, self.length):
+            x = self._x(pos)
+            if SIDE_MARGIN - 9 <= x <= self.width() - SIDE_MARGIN + 9:
+                painter.drawLine(QPointF(x, bar_y - 6), QPointF(x, bar_y + 6))
 
-        tick_label_y = bar_y + 12 + rev_rows * ROW_GAP + 4
+        if letters:
+            self._draw_bases(painter, bar_y)
+
+        tick_label_y = bar_y + first_row - 2 + rev_rows * ROW_GAP + 4
         self._draw_ticks(painter, bar_y, tick_label_y)
+
+        if self.marks:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colors.match))
+            for start, end in self.marks:
+                if self._visible(start, end):
+                    left = self._x(start)
+                    painter.drawRect(QRectF(left, bar_y - 3, max(self._x(end) - left, 2), 6))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
         # features: forward strand above the bar, reverse below
         top_labels, bottom_labels = [], []
@@ -407,11 +574,18 @@ class LinearDNAViewer(MapView):
         for i, feature in enumerate(self.features):
             if i not in self._lanes:
                 continue
+            visible_parts = [(s, e) for s, e in feature_parts(feature) if self._visible(s, e)]
+            if not visible_parts:
+                continue
             forward = self._is_forward(i)
-            offset = 14 + self._lanes[i] * ROW_GAP
+            offset = first_row + self._lanes[i] * ROW_GAP
             y = bar_y - offset if forward else bar_y + offset
             self._draw_feature(painter, i, feature, y)
-            label = (0, self._x(self._feature_mid(feature)), feature_label(feature),
+            # label over the middle of the longest part that's on screen
+            span_start, span_end = self.view_start, self.view_start + self.visible_span()
+            s, e = max(visible_parts, key=lambda p: min(p[1], span_end) - max(p[0], span_start))
+            mid = (max(s, span_start) + min(e, span_end)) / 2
+            label = (0, self._x(mid), feature_label(feature),
                      colors.label_color(feature_color(feature)), y)
             (top_labels if forward else bottom_labels).append(label)
 
@@ -419,12 +593,15 @@ class LinearDNAViewer(MapView):
         painter.setPen(QPen(QColor(colors.site), 1.5))
         for name, positions in self.sites.items():
             for pos in positions:
+                if not self._visible(pos, pos):
+                    continue
                 x = self._x(pos)
                 painter.drawLine(QPointF(x, bar_y - 7), QPointF(x, bar_y + 7))
                 top_labels.append((1, x, name, QColor(colors.site), bar_y - 7))
 
+        painter.setClipping(False)
         if len(top_labels) + len(bottom_labels) <= MAX_LABELS:
-            top_base = bar_y - 14 - max(fwd_rows, 1) * ROW_GAP - 4
+            top_base = bar_y - first_row - max(fwd_rows, 1) * ROW_GAP - 4
             self._draw_labels(painter, top_labels, top_base, upward=True)
             self._draw_labels(painter, bottom_labels, tick_label_y + 22, upward=False)
         painter.end()
@@ -436,18 +613,51 @@ class LinearDNAViewer(MapView):
         metrics = QFontMetrics(painter.font())
         painter.drawText(QPointF(12, 10 + metrics.ascent()), self.title)
         offset = metrics.horizontalAdvance(self.title) + 10
+        text = f"{self.length:,} bp"
+        if self.zoom > 1.0:
+            first = int(self.view_start) + 1
+            last = min(self.length, int(self.view_start + self.visible_span()))
+            text += f"   ·   showing {first:,}–{last:,}"
         painter.setFont(small_font(10))
         painter.setPen(QColor(colors.muted))
-        painter.drawText(QPointF(12 + offset, 10 + metrics.ascent()), f"{self.length:,} bp")
+        painter.drawText(QPointF(12 + offset, 10 + metrics.ascent()), text)
+
+    def _draw_bases(self, painter, bar_y):
+        """Top strand above the bar, complementary strand below."""
+        colors = theme.current()
+        font = QFont("Monospace")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(8 if self.px_per_bp() < 11 else 10)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        h = metrics.height()
+        complement = str.maketrans("ACGTURYKMBDHVN", "TGCAAYRMKVHDBN")
+        first = max(0, int(self.view_start))
+        last = min(self.length, int(self.view_start + self.visible_span()) + 1)
+        step = self.px_per_bp()
+        for pos in range(first, last):
+            base = self.sequence[pos]
+            pair = base.translate(complement)
+            x = self._x(pos)
+            for letter, y in ((base, bar_y - 6 - h), (pair, bar_y + 6)):
+                painter.setPen(QColor(colors.dna_colors.get(letter, colors.other_letter)))
+                painter.drawText(QRectF(x, y, step, h), Qt.AlignmentFlag.AlignCenter, letter)
 
     def _draw_ticks(self, painter, bar_y, label_y):
         colors = theme.current()
-        interval = nice_interval(self.length)
+        span = self.visible_span()
+        interval = nice_interval(span)
         painter.setFont(small_font())
         metrics = QFontMetrics(painter.font())
-        positions = list(range(0, self.length, interval)) + [self.length]
+        first = int(self.view_start // interval) * interval
+        last = self.view_start + span
+        positions = list(range(first, int(last) + 1, interval))
+        if self.view_start + span >= self.length:
+            positions.append(self.length)
         last_right = -1e9
         for pos in positions:
+            if pos < self.view_start or pos > last:
+                continue
             x = self._x(pos)
             painter.setPen(QPen(QColor(colors.tick), 1))
             painter.drawLine(QPointF(x, bar_y + 3), QPointF(x, bar_y + 7))
@@ -472,24 +682,28 @@ class LinearDNAViewer(MapView):
             painter.setPen(QPen(QColor(theme.current().text), 2))
         else:
             painter.setPen(Qt.PenStyle.NoPen)
+        lo, hi = self._edges()  # parts running off the map area are cut there, without an arrow
         for number, (start, end) in enumerate(parts):
+            if not self._visible(start, end):
+                continue
             left, right = self._x(start), self._x(end)
             right = max(right, left + 2)
             arrow = min(8.0, (right - left) * 0.6)
             is_last = number == len(parts) - 1  # the 3' end is in the last part
-            if strand == 1 and is_last:
-                shape = [QPointF(left, y - half), QPointF(right - arrow, y - half),
+            l, r = max(left, lo), min(right, hi)
+            if strand == 1 and is_last and right <= hi:
+                shape = [QPointF(l, y - half), QPointF(right - arrow, y - half),
                          QPointF(right, y), QPointF(right - arrow, y + half),
-                         QPointF(left, y + half)]
-            elif strand == -1 and is_last:
-                shape = [QPointF(right, y - half), QPointF(left + arrow, y - half),
+                         QPointF(l, y + half)]
+            elif strand == -1 and is_last and left >= lo:
+                shape = [QPointF(r, y - half), QPointF(left + arrow, y - half),
                          QPointF(left, y), QPointF(left + arrow, y + half),
-                         QPointF(right, y + half)]
+                         QPointF(r, y + half)]
             else:
-                shape = [QPointF(left, y - half), QPointF(right, y - half),
-                         QPointF(right, y + half), QPointF(left, y + half)]
+                shape = [QPointF(l, y - half), QPointF(r, y - half),
+                         QPointF(r, y + half), QPointF(l, y + half)]
             painter.drawPolygon(QPolygonF(shape))
-            self._hit_rects.append((index, QRectF(left, y - half, right - left, height)))
+            self._hit_rects.append((index, QRectF(l, y - half, r - l, height)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _draw_labels(self, painter, labels, base_y, upward):
@@ -503,16 +717,15 @@ class LinearDNAViewer(MapView):
         for _, x, text, color, anchor_y in sorted(labels, key=lambda item: (item[0], item[1])):
             w = metrics.horizontalAdvance(text) + 4
             left = min(max(x - w / 2, 2), self.width() - w - 2)
+            rect = None
             for row in range(8):
                 top = base_y - h - row * h if upward else base_y + row * h
-                rect = QRectF(left, top, w, h)
-                if rect.top() < 0 or rect.bottom() > self.height():
-                    rect = None
+                candidate = QRectF(left, top, w, h)
+                if candidate.top() < 30 or candidate.bottom() > self.height():
+                    break  # keep clear of the title and the bottom edge
+                if not any(candidate.intersects(other) for other in placed):
+                    rect = candidate
                     break
-                if not any(rect.intersects(other) for other in placed):
-                    break
-            else:
-                rect = None
             if rect is None:
                 continue  # no free spot: skip this label rather than overlap
             placed.append(rect)
@@ -527,6 +740,46 @@ class LinearDNAViewer(MapView):
             if rect.adjusted(-2, -3, 2, 3).contains(point):
                 return index
         return -1
+
+
+class LinearMapPanel(QWidget):
+    """The linear map with a scrollbar and zoom buttons underneath."""
+
+    def __init__(self, viewer):
+        super().__init__()
+        self.viewer = viewer
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(viewer, 1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(4, 0, 4, 2)
+        self.scrollbar = QScrollBar(Qt.Orientation.Horizontal)
+        self.scrollbar.valueChanged.connect(viewer.set_view_start)
+        row.addWidget(self.scrollbar, 1)
+        for text, tip, slot in (("−", "Zoom out", lambda: viewer.zoom_by(1 / 2)),
+                                ("+", "Zoom in", lambda: viewer.zoom_by(2)),
+                                ("Fit", "Show the whole sequence", viewer.fit)):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            row.addWidget(button)
+        layout.addLayout(row)
+        viewer.viewChanged.connect(self.sync_scrollbar)
+        self.sync_scrollbar()
+
+    def sync_scrollbar(self):
+        viewer = self.viewer
+        span = int(round(viewer.visible_span()))
+        self.scrollbar.blockSignals(True)
+        self.scrollbar.setRange(0, max(0, viewer.length - span))
+        self.scrollbar.setPageStep(max(1, span))
+        self.scrollbar.setSingleStep(max(1, span // 20))
+        self.scrollbar.setValue(int(round(viewer.view_start)))
+        self.scrollbar.setEnabled(viewer.zoom > 1.0)
+        self.scrollbar.blockSignals(False)
 
 
 # =================================================================== group
@@ -553,3 +806,36 @@ class MapGroup:
     def update(self):
         for view in self.views:
             view.update()
+
+
+# =================================================================== export
+def export_image(widget, path, fmt="png", title="", scale=2):
+    """Save what a map widget shows as a PNG (at `scale` x resolution, so it
+    stays sharp in slides) or as an SVG (vector, editable in Inkscape or
+    Illustrator)."""
+    if fmt == "svg":
+        from PySide6.QtSvg import QSvgGenerator
+
+        generator = QSvgGenerator()
+        generator.setFileName(str(path))
+        generator.setSize(widget.size())
+        generator.setViewBox(QRect(QPoint(0, 0), widget.size()))
+        generator.setTitle(title or "N-Zoom map")
+        generator.setDescription("Made with N-Zoom")
+        _render_into(widget, generator)
+        return
+    image = QImage(widget.width() * scale, widget.height() * scale, QImage.Format.Format_ARGB32)
+    image.setDevicePixelRatio(scale)
+    image.fill(Qt.GlobalColor.transparent)
+    _render_into(widget, image)
+    if not image.save(str(path), "PNG"):
+        raise OSError(f"Could not write {path}")
+
+
+def _render_into(widget, device):
+    painter = QPainter(device)
+    try:
+        widget.render(painter, QPoint(0, 0))
+    finally:
+        # Qt crashes if a painter is still open when its target is freed
+        painter.end()

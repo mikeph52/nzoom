@@ -33,6 +33,8 @@ class Theme:
     highlight: tuple         # RGBA band showing the selected region on maps
     feature_highlight: str   # background of a selected feature in the Sequence view
     other_letter: str        # sequence letters without a specific color
+    match: str               # Find matches marked on the maps
+    match_highlight: str     # background of Find matches in the Sequence view
     dna_colors: dict = field(default_factory=dict)
     protein_colors: dict = field(default_factory=dict)
 
@@ -47,6 +49,7 @@ LIGHT = Theme(
     background="#ffffff", text="#222222", muted="#666666", backbone="#333333",
     tick="#555555", leader="#bdbdbd", site="#c62828",
     highlight=(255, 193, 7, 160), feature_highlight="#fff59d", other_letter="#424242",
+    match="#8e24aa", match_highlight="#ffcc80",
     dna_colors=dict(DNA_COLORS), protein_colors=dict(PROTEIN_COLORS),
 )
 
@@ -55,6 +58,7 @@ DARK = Theme(
     background="#1e1f22", text="#e8e8e8", muted="#a0a0a0", backbone="#c8c8c8",
     tick="#9a9a9a", leader="#55585e", site="#ef5350",
     highlight=(255, 202, 40, 110), feature_highlight="#5c4f12", other_letter="#bdbdbd",
+    match="#ce93d8", match_highlight="#6d4318",
     dna_colors={"A": "#66bb6a", "T": "#ef5350", "U": "#ef5350", "G": "#ffca28",
                 "C": "#42a5f5", "N": "#9e9e9e"},
     protein_colors={
