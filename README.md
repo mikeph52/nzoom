@@ -17,9 +17,9 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 ![](docs/gui-2.png)
 ---
 
-## Features
+## Features (Demo)
 
- **Open FASTA and GenBank files**, including files that hold several records
+ **FASTA & Genbank support**, including files that hold several records
 - **Circular and linear maps** with colored, strand-aware features and auto-placed labels; the style follows the sequence's topology, or pick one yourself
 - **Zoomable maps**: mouse-wheel zoom on both the circular and linear map, down to individual bases
 - **Export maps** as high-resolution PNG or editable SVG
@@ -27,7 +27,6 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 - **Add, edit and delete features**, including features that cross the origin of a circular plasmid, with full **undo/redo**
 - **Find sequence** (Ctrl+F) with IUPAC codes, on both strands, with every match highlighted
 - **ORF finder** that searches all six reading frames; turn any ORF into a CDS feature with one click
-- **Right-click menus** to copy, reverse-complement or translate any selection or feature
 - **Colored sequence view** for DNA and protein, with a live position, length and GC% readout for the selection
 - **Restriction site analysis** over all commercially available enzymes, with unique cutters marked on the map
 - **Virtual digest** with single and multiple enzymes, a simulated agarose gel with ladders, fragment tables, and PNG export
@@ -94,38 +93,63 @@ The tests run without opening any windows and never connect to NCBI. Run them be
 
 ```
 N-Zoom/
-├── main.py              # main window: start the app here
-├── requirements.txt
-├── requirements-dev.txt # extra tools for development (pytest)
-├── pytest.ini           # pytest settings
-├── core/
+├── core
+│   ├── dialogs.py
+│   ├── digest.py
 │   ├── __init__.py
-│   ├── dialogs.py       # pop-up windows: feature editor, translation, restriction sites
-│   ├── digest.py        # virtual digest window and simulated gel
-│   ├── maps.py          # circular and linear maps, image export
-│   ├── primers.py       # primer search window
-│   ├── reads.py         # sequencing-reads window and chromatogram
-│   ├── seqtools.py      # sequence logic: files, features, ORFs, primers, digests, reads, NCBI
-│   ├── theme.py         # light and dark colors
-│   ├── undo.py          # undoable feature changes
-│   ├── viewers.py       # sequence view
-│   └── workers.py       # runs slow tasks in the background
-├── docs/
-│   └── documentation.md # user manual
-├── examples/
-│   ├── pDEMO.gb         # demo plasmid with features
-│   └── pDEMO_*.ab1      # simulated Sanger reads of a pDEMO clone
-├── tools/
-│   ├── abif_writer.py   # writes simulated .ab1 files (for demos and tests)
-│   └── make_demo_reads.py
-└── tests/
-    ├── conftest.py      # shared test setup
-    ├── test_seqtools.py # sequence logic
-    ├── test_orfs.py     # ORF finder
-    ├── test_primers_digest.py  # primers, Tm, digests and Find
-    ├── test_reads.py    # read loading, trimming and alignment
-    ├── test_environment.py     # checks the installed libraries
-    └── test_gui.py      # main-window workflows
+│   ├── maps.py
+│   ├── primers.py
+│   ├── __pycache__
+│   │   ├── dialogs.cpython-314.pyc
+│   │   ├── digest.cpython-314.pyc
+│   │   ├── __init__.cpython-314.pyc
+│   │   ├── maps.cpython-314.pyc
+│   │   ├── primers.cpython-314.pyc
+│   │   ├── reads.cpython-314.pyc
+│   │   ├── seqtools.cpython-314.pyc
+│   │   ├── theme.cpython-314.pyc
+│   │   ├── undo.cpython-314.pyc
+│   │   ├── viewers.cpython-314.pyc
+│   │   └── workers.cpython-314.pyc
+│   ├── reads.py
+│   ├── seqtools.py
+│   ├── theme.py
+│   ├── undo.py
+│   ├── viewers.py
+│   └── workers.py
+├── docs
+│   ├── documentation.md
+│   ├── gel.png
+│   ├── gui-1.png
+│   ├── gui-2.png
+│   └── gui.png
+├── examples
+│   ├── L09137.2.gb
+│   ├── pDEMO.gb
+│   ├── pDEMO_GFP_fwd.ab1
+│   ├── pDEMO_GFP_rev.ab1
+│   ├── pDEMO_ori_fwd.ab1
+│   ├── protein.faa
+│   ├── rna.fna
+│   └── ti_plasmid.fasta
+├── LICENSE
+├── main.py
+├── pytest.ini
+├── README.md
+├── requirements-dev.txt
+├── requirements.txt
+├── tests
+│   ├── conftest.py
+│   ├── test_environment.py
+│   ├── test_gui.py
+│   ├── test_orfs.py
+│   ├── test_primers_digest.py
+│   ├── test_reads.py
+│   └── test_seqtools.py
+└── tools
+    ├── abif_writer.py
+    ├── __init__.py
+    └── make_demo_reads.py
 ```
 
 ## Contributing
