@@ -13,6 +13,8 @@ N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FA
 ![](docs/gui-1.png)
 
 ![](docs/gel.png)
+
+![](docs/gui-2.png)
 ---
 
 ## Features
