@@ -9,6 +9,7 @@ boxes).
 import time
 
 import pytest
+
 from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog
 
 from core import seqtools as st
@@ -196,12 +197,12 @@ def test_map_style_follows_topology(window, monkeypatch, tmp_path):
     open_demo(window, monkeypatch, tmp_path)
     assert window.map_stack.currentWidget() is window.circular_viewer
     window.show_records(window.records + [linear_copy_of_demo()], select=1)
-    assert window.map_stack.currentWidget() is window.linear_viewer
+    assert window.map_stack.currentWidget() is window.linear_panel
 
     window.set_map_mode("circular")  # the user can override it
     assert window.map_stack.currentWidget() is window.circular_viewer
     window.set_map_mode("auto")
-    assert window.map_stack.currentWidget() is window.linear_viewer
+    assert window.map_stack.currentWidget() is window.linear_panel
 
 
 def test_both_maps_get_the_same_data(window, monkeypatch, tmp_path):
@@ -306,3 +307,187 @@ def test_digest_reuses_restriction_search(window, qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(DigestDialog, "exec", lambda self: 0)
     window.open_digest()
     assert "digest" not in window.tasks  # opened straight away from the cached search
+
+
+# ------------------------------------------------------------------ find
+def test_find_bar(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    window.show_find()
+    assert window.find_bar.isVisible()
+
+    window.find_edit.setText("GGTAC")  # KpnI-like, not palindromic: both strands
+    hits = window.find_hits
+    assert len(hits) == len(st.find_motif(window.current_sequence, "GGTAC", circular=True))
+    assert {h["strand"] for h in hits} == {1, -1}
+    assert window.find_status.text().startswith("1 of ")
+    first = window.viewer.selected_range()
+
+    window.find_next()
+    assert window.find_index == 1 and window.viewer.selected_range() != first
+    window.find_previous()
+    assert window.viewer.selected_range() == first
+    assert len(window.circular_viewer.marks) == len(hits)
+
+    window.find_both.setChecked(False)
+    assert all(h["strand"] == 1 for h in window.find_hits)
+
+    window.find_edit.setText("GGZ")
+    assert window.find_hits == [] and "IUPAC" in window.find_status.text()
+
+    window.hide_find()
+    assert window.circular_viewer.marks == [] and not window.find_bar.isVisible()
+
+
+def test_find_starts_from_selection(window, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    window.viewer.select_range(600, 606)
+    window.show_find()
+    assert window.find_edit.text() == "GAATTC"
+    assert window.find_status.text() == "1 of 1"
+
+
+# ------------------------------------------------------------------ linear zoom
+def test_linear_zoom_and_scroll(window, monkeypatch, tmp_path):
+    window.show_records([linear_copy_of_demo()])
+    view, panel = window.linear_viewer, window.linear_panel
+    assert view.zoom == 1 and not panel.scrollbar.isEnabled()
+
+    view.zoom_by(4)
+    assert view.zoom == 4 and abs(view.visible_span() - 1000) < 1
+    assert panel.scrollbar.isEnabled() and panel.scrollbar.maximum() == 3000
+
+    panel.scrollbar.setValue(2000)  # scrollbar moves the map
+    assert view.view_start == 2000
+
+    view.zoom_by(1000)  # capped so a base is at most MAX_PX_PER_BP pixels wide
+    assert view.zoom == view.max_zoom()
+    view.grab()  # draws the bases without errors
+
+    view.fit()
+    assert view.zoom == 1 and view.view_start == 0
+
+
+def test_linear_zoom_keeps_point_under_mouse(window):
+    window.show_records([linear_copy_of_demo()])
+    view = window.linear_viewer
+    x = view.width() * 0.3
+    before = view._pos_at(x)
+    view.zoom_by(3, anchor_x=x)
+    assert abs(view._pos_at(x) - before) < 1
+
+
+def test_linear_map_scrolls_to_selected_feature(window):
+    window.show_records([linear_copy_of_demo()])
+    view = window.linear_viewer
+    view.zoom_by(10)  # 400 bp visible, starting near the middle
+    view.set_view_start(0)
+    ampr = labels(window).index("AmpR")
+    window.select_feature_row(ampr)
+    start, end = 2105, 2966
+    assert view.view_start <= start + 1 and view.view_start + view.visible_span() >= start
+
+
+# ------------------------------------------------------------------ export
+@pytest.mark.parametrize("fmt", ["png", "svg"])
+@pytest.mark.parametrize("style", ["circular", "linear"])
+def test_export_map(window, monkeypatch, tmp_path, fmt, style):
+    from xml.dom import minidom
+    from PySide6.QtGui import QImage
+    open_demo(window, monkeypatch, tmp_path)
+    window.set_map_mode(style)
+    path = tmp_path / f"map.{fmt}"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(path), "")))
+    window.export_map()
+
+    assert path.exists()
+    view = window.current_map_view()
+    if fmt == "png":
+        image = QImage(str(path))
+        assert (image.width(), image.height()) == (view.width() * 2, view.height() * 2)
+    else:
+        svg = minidom.parse(str(path))  # valid XML
+        assert "GFP" in path.read_text()  # labels are real text in the SVG
+
+
+# ------------------------------------------------------------------ undo
+def test_undo_redo_add_edit_delete(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    open_demo(window, monkeypatch, tmp_path)
+    stack = window.undo_stack
+    original = labels(window)
+
+    fill_feature_dialog(monkeypatch, name="new one", start=10, end=50)
+    window.add_feature()
+    assert "new one" in labels(window) and window.modified
+
+    index = labels(window).index("GFP")
+    fill_feature_dialog(monkeypatch, name="GFP renamed")
+    window.edit_item(index)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    window.delete_item(labels(window).index("ori"))
+    assert stack.count() == 3
+
+    stack.undo()  # delete
+    assert "ori" in labels(window)
+    stack.undo()  # edit
+    assert "GFP" in labels(window) and "GFP renamed" not in labels(window)
+    stack.undo()  # add
+    assert labels(window) == original
+    assert not window.modified  # back to the saved state: no "*" in the title
+    assert not window.windowTitle().endswith("*")
+
+    stack.redo(); stack.redo(); stack.redo()
+    assert "new one" in labels(window) and "GFP renamed" in labels(window)
+    assert "ori" not in labels(window) and window.modified
+
+
+def test_undo_restores_feature_position_and_location(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    open_demo(window, monkeypatch, tmp_path)
+    features = window.current_record.features
+    before = [id(f) for f in features]
+    index = labels(window).index("AmpR")
+    location = window.current_features[index].location
+
+    fill_feature_dialog(monkeypatch, start=3901, end=60)
+    window.edit_item(index)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    window.delete_item(labels(window).index("lac promoter"))
+
+    window.undo_stack.undo()
+    window.undo_stack.undo()
+    assert [id(f) for f in features] == before  # same objects, same order
+    assert window.current_features[labels(window).index("AmpR")].location == location
+
+
+def test_save_marks_clean_and_undo_makes_it_dirty_again(window, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    fill_feature_dialog(monkeypatch, name="x", start=1, end=9)
+    window.add_feature()
+    assert window.save() and not window.modified
+    window.undo_stack.undo()
+    assert window.modified  # the file on disk still has the feature
+
+
+def test_primers_and_orf_conversion_are_undoable(window, qapp, monkeypatch, tmp_path):
+    from core.primers import PrimerDialog
+    open_demo(window, monkeypatch, tmp_path)
+    count = len(window.current_features)
+    dialog = PrimerDialog(window, window.current_sequence, True, on_add=window.add_primer_features)
+    dialog.primer_edit.setPlainText(window.current_sequence[700:722])
+    dialog.add_selected()
+    assert len(window.current_features) == count + 1
+    assert window.undo_stack.undoText().startswith("Add 1 primer site")
+    window.undo_stack.undo()
+    assert len(window.current_features) == count
+
+
+def test_opening_a_file_clears_undo_history(window, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    fill_feature_dialog(monkeypatch, name="x", start=1, end=9)
+    window.add_feature()
+    open_demo(window, monkeypatch, tmp_path / "again" if False else tmp_path)
+    assert window.undo_stack.count() == 0

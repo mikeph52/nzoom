@@ -108,3 +108,43 @@ def test_same_position_enzymes_are_merged():
     cuts, fragments = st.digest(sequence, ["SpeI", "BcuI", "Acc65I", "KpnI"], circular=False)
     assert cuts == [(12, "BcuI/SpeI"), (38, "Acc65I"), (42, "KpnI")]
     assert [f["length"] for f in fragments] == [11, 26, 4, len(sequence) - 41]
+
+
+# ------------------------------------------------------------------ motif search
+def test_find_palindrome_reported_once(demo_seq):
+    [hit] = st.find_motif(demo_seq, "GAATTC", circular=True)
+    assert (hit["strand"], hit["start"], hit["end"]) == (0, 601, 606)
+
+
+def test_find_iupac(demo_seq):
+    hits = st.find_motif(demo_seq, "GGNNCC", circular=True)
+    import re
+    expected = [m.start() + 1 for m in re.finditer(r"(?=GG..CC)", demo_seq)]
+    assert sorted({h["start"] for h in hits}) == sorted(set(expected))
+
+
+def test_find_reverse_strand_only(demo_seq):
+    motif = st.reverse_complement(demo_seq[100:115])
+    [hit] = st.find_motif(demo_seq, motif, circular=True)
+    assert (hit["strand"], hit["start"], hit["end"]) == (-1, 101, 115)
+    assert st.find_motif(demo_seq, motif, both_strands=False) == []
+
+
+def test_find_across_origin(demo_seq):
+    motif = demo_seq[-4:] + demo_seq[:5]
+    [hit] = st.find_motif(demo_seq, motif, circular=True)
+    assert (hit["start"], hit["end"]) == (3997, 5)
+    assert st.find_motif(demo_seq, motif, circular=False) == []
+
+
+def test_find_overlapping_matches():
+    assert [h["start"] for h in st.find_motif("AAAAA", "AA", both_strands=False)] == [1, 2, 3, 4]
+
+
+def test_find_protein():
+    assert [h["start"] for h in st.find_motif("MKAVMKC", "MKX", dna=False)] == [1, 5]
+
+
+def test_find_rejects_bad_letters():
+    with pytest.raises(ValueError, match="IUPAC"):
+        st.find_motif("ACGT", "ACZ")
