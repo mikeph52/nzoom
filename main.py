@@ -43,7 +43,7 @@ from core.primers import PrimerDialog
 from core.viewers import SequenceViewer
 from core.workers import Task
 
-VERSION = "0.10.1"
+VERSION = "0.11.1"
 MAP_MODES = [("auto", "Automatic (from topology)"), ("circular", "Circular"), ("linear", "Linear")]
 THEME_NAMES = {"system": "Same as system", "light": "Light", "dark": "Dark"}
 
