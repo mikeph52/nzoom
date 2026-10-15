@@ -4,6 +4,7 @@
 
 N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FASTA or GenBank file, or pull a sequence straight from NCBI. You can then explore it on an annotated circular map.
 
+[![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)](#)
 ![Tests](https://github.com/mikeph52/nzoom/actions/workflows/tests.yml/badge.svg)
 
 > [!IMPORTANT]
