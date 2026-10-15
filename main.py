@@ -43,13 +43,14 @@ from core import seqtools as st
 from core import theme
 from core.dialogs import FeatureDialog, RestrictionSitesDialog, TextResultDialog, number_item
 from core.digest import DigestDialog
-from core.maps import CircularDNAViewer, LinearDNAViewer, LinearMapPanel, MapGroup, export_image
+from core.maps import CircularDNAViewer, LinearDNAViewer, MapGroup, MapPanel, export_image
 from core.primers import PrimerDialog
+from core.reads import ReadsDialog
 from core.undo import AddFeatures, DeleteFeature, EditFeature, snapshot
 from core.viewers import SequenceViewer
 from core.workers import Task
 
-VERSION = "0.12.1"
+VERSION = "0.13.1"
 MAX_FIND_HITS = 5000  # Find stops counting after this many matches
 MAP_MODES = [("auto", "Automatic (from topology)"), ("circular", "Circular"), ("linear", "Linear")]
 THEME_NAMES = {"system": "Same as system", "light": "Light", "dark": "Dark"}
@@ -77,7 +78,10 @@ class MainWindow(QMainWindow):
         self.current_sequence = ""
         self.current_features = []   # annotated features of the current record
         self.current_orfs = []       # ORFs found by the ORF finder (not saved)
-        self.items = []              # features + ORFs: what the map and table show
+        self.current_reads = []      # aligned sequencing reads, shown as items (not saved)
+        self.reads_by_record = {}    # id(record) -> read results, kept while N-Zoom runs
+        self.reads_dialog = None
+        self.items = []              # features + ORFs + reads: what the map and table show
 
         # file state
         self.current_path = None     # where Save writes to
@@ -173,6 +177,11 @@ class MainWindow(QMainWindow):
         self.add_action(tools_menu, "Clear ORFs", self.clear_orfs)
         tools_menu.addSeparator()
         self.add_action(tools_menu, "Find primer...", self.open_primer_dialog, "Ctrl+P")
+        tools_menu.addSeparator()
+        self.reads_action = self.add_action(tools_menu, "Align sequencing reads...",
+                                            self.align_reads, "Ctrl+L")
+        self.add_action(tools_menu, "Show aligned reads", self.show_reads_dialog)
+        self.add_action(tools_menu, "Clear reads", self.clear_reads)
 
         about_menu = self.menuBar().addMenu("About")
         self.add_action(about_menu, "About", self.show_about)
@@ -229,12 +238,14 @@ class MainWindow(QMainWindow):
         self.circular_viewer = CircularDNAViewer()
         self.linear_viewer = LinearDNAViewer()
         self.maps = MapGroup(self.circular_viewer, self.linear_viewer)
-        self.linear_panel = LinearMapPanel(self.linear_viewer)  # adds scrollbar + zoom buttons
+        # each map sits in a panel with zoom buttons (the linear one also gets a scrollbar)
+        self.circular_panel = MapPanel(self.circular_viewer, scrollbar=False)
+        self.linear_panel = MapPanel(self.linear_viewer, scrollbar=True)
         self.map_stack = QStackedWidget()
         for view in (self.circular_viewer, self.linear_viewer):
             view.featureClicked.connect(self.select_feature_row)
             view.featureContextMenu.connect(self.map_context_menu)
-        self.map_stack.addWidget(self.circular_viewer)
+        self.map_stack.addWidget(self.circular_panel)
         self.map_stack.addWidget(self.linear_panel)
         self.view_tabs.addTab(self.map_stack, "Map")
         self.viewer = SequenceViewer()
@@ -307,6 +318,7 @@ class MainWindow(QMainWindow):
         self.digest_button = add_button("Virtual digest", self.open_digest)
         self.orf_button = add_button("Find ORFs", self.find_orfs)
         add_button("Find primer", self.open_primer_dialog)
+        self.reads_button = add_button("Align reads", self.align_reads)
         add_button("Add feature", self.add_feature)
         right_layout.addWidget(actions_box)
         right_layout.addStretch()
@@ -393,6 +405,7 @@ class MainWindow(QMainWindow):
 
         self.current_path, self.current_format = path, fmt
         self.undo_stack.clear()  # old commands refer to the records being closed
+        self.reads_by_record.clear()  # so do the aligned reads
         self.show_records(records)
         self.file_label.setText(str(Path(path)))
         self.set_modified(False)
@@ -516,7 +529,10 @@ class MainWindow(QMainWindow):
         self.current_sequence = sequence
         self.current_features = st.display_features(record)
         self.current_orfs = []
-        self.items = list(self.current_features)
+        self.current_reads = self.read_items(self.reads_by_record.get(id(record), []))
+        self.items = self.current_features + self.current_reads
+        if self.reads_dialog is not None:
+            self.reads_dialog.close()  # it shows another record's reads
 
         self.sequence_title.setText(record.description or record.id)
         self.viewer.set_sequence(sequence, seq_type)
@@ -551,9 +567,9 @@ class MainWindow(QMainWindow):
 
     def update_feature_count(self):
         text = str(len(self.current_features))
-        if self.current_orfs:
-            count = len(self.current_orfs)
-            text += f"  (+ {count} ORF{'' if count == 1 else 's'})"
+        for things, word in ((self.current_orfs, "ORF"), (self.current_reads, "read")):
+            if things:
+                text += f"  (+ {len(things)} {word}{'' if len(things) == 1 else 's'})"
         self.features_value.setText(text)
 
     def refresh_features(self, select=None):
@@ -562,7 +578,7 @@ class MainWindow(QMainWindow):
         if self.current_record is None:
             return
         self.current_features = st.display_features(self.current_record)
-        self.items = self.current_features + self.current_orfs
+        self.items = self.current_features + self.current_orfs + self.current_reads
         if self.maps.length:
             self.maps.set_features(self.items)
         self.fill_feature_table()
@@ -573,8 +589,16 @@ class MainWindow(QMainWindow):
                     self.select_feature_row(index)
                     break
 
-    def is_orf(self, index):
+    # self.items = annotated features, then ORFs, then reads
+    def is_suggestion(self, index):
+        """ORFs and reads: shown, but not part of the file."""
         return index >= len(self.current_features)
+
+    def is_orf(self, index):
+        return len(self.current_features) <= index < len(self.current_features) + len(self.current_orfs)
+
+    def is_read(self, index):
+        return index >= len(self.current_features) + len(self.current_orfs)
 
     def fill_feature_table(self):
         table = self.feature_table
@@ -598,7 +622,7 @@ class MainWindow(QMainWindow):
             ]
             cells[0].setData(Qt.ItemDataRole.UserRole, row)  # index into self.items
             for column, cell in enumerate(cells):
-                if self.is_orf(row):  # ORFs: grey italic, so they read as "suggestions"
+                if self.is_suggestion(row):  # ORFs/reads: grey italic, not part of the file
                     cell.setForeground(Qt.GlobalColor.darkGray)
                     cell.setFont(orf_font)
                 table.setItem(row, column, cell)
@@ -706,7 +730,7 @@ class MainWindow(QMainWindow):
         return menu
 
     def build_item_menu(self, index):
-        """Menu for one feature or ORF (feature table or map)."""
+        """Menu for one feature, ORF or read (feature table or map)."""
         menu = QMenu(self)
         if index < 0 or index >= len(self.items):
             return menu
@@ -716,6 +740,13 @@ class MainWindow(QMainWindow):
         title = menu.addAction(f"{item.type}: {st.feature_label(item)}")
         title.setEnabled(False)
         menu.addSeparator()
+        if self.is_read(index):
+            name = item.qualifiers["read_name"][0]
+            menu.addAction("Show alignment and chromatogram", lambda: self.show_reads_dialog(name))
+            menu.addAction("Select in sequence", lambda: self.select_item_in_sequence(index))
+            menu.addSeparator()
+            menu.addAction("Remove this read", lambda: self.remove_read(name))
+            return menu
         menu.addAction("Select in sequence", lambda: self.select_item_in_sequence(index))
         menu.addAction("Copy sequence", lambda: self.copy_text(
             st.feature_sequence(self.current_sequence, item),
@@ -820,6 +851,9 @@ class MainWindow(QMainWindow):
         if self.is_orf(index):
             self.add_orf_as_feature(index)
             return
+        if self.is_read(index):
+            self.show_reads_dialog(self.items[index].qualifiers["read_name"][0])
+            return
         feature = self.items[index]
         dialog = FeatureDialog(
             self, len(self.current_sequence), st.is_circular(self.current_record), feature=feature
@@ -834,7 +868,7 @@ class MainWindow(QMainWindow):
                                          self.on_features_changed))
 
     def delete_item(self, index):
-        if index < 0 or index >= len(self.items) or self.is_orf(index):
+        if index < 0 or index >= len(self.items) or self.is_suggestion(index):
             return
         feature = self.items[index]
         answer = QMessageBox.question(
@@ -916,6 +950,7 @@ class MainWindow(QMainWindow):
             ("restriction", (self.rs_action, self.rs_button)),
             ("orfs", (self.orf_action, self.orf_button)),
             ("digest", (self.digest_action, self.digest_button)),
+            ("reads", (self.reads_action, self.reads_button)),
         ):
             for widget in widgets:
                 widget.setEnabled(kind not in self.tasks)
@@ -1152,7 +1187,7 @@ class MainWindow(QMainWindow):
 
     # ================================================================ export
     def current_map_view(self):
-        if self.map_stack.currentWidget() is self.circular_viewer:
+        if self.map_stack.currentWidget() is self.circular_panel:
             return self.circular_viewer
         return self.linear_viewer
 
@@ -1190,6 +1225,99 @@ class MainWindow(QMainWindow):
             f"Add {count} primer site{'s' if count != 1 else ''} "
             f"\u201c{st.feature_label(features[0])}\u201d"))
 
+    # ================================================================ sequencing reads
+    READ_FILTER = ("Sequencing reads (*.ab1 *.abi *.fastq *.fq *.fasta *.fa *.fas *.seq *.txt);;"
+                   "All files (*)")
+
+    def align_reads(self):
+        if not self.require_dna("Read alignment"):
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Align sequencing reads", "", self.READ_FILTER)
+        if not paths:
+            return
+        record = self.current_record
+        self.start_task(
+            "reads", f"Aligning {len(paths)} read{'s' if len(paths) != 1 else ''} to {record.id}...",
+            st.align_reads, self.current_sequence, paths, st.is_circular(record),
+            on_done=lambda results: self.add_reads(record, results),
+            on_fail=lambda message: QMessageBox.critical(
+                self, "Error", f"Read alignment failed:\n{message}"),
+        )
+
+    def add_reads(self, record, results):
+        # a read aligned again replaces its earlier result
+        kept = [r for r in self.reads_by_record.get(id(record), [])
+                if r["path"] not in {new["path"] for new in results}]
+        self.reads_by_record[id(record)] = kept + results
+        aligned = sum(1 for r in results if r["alignment"])
+        self.statusBar().showMessage(
+            f"Aligned {aligned} of {len(results)} read{'s' if len(results) != 1 else ''}", 8000)
+        if record is not self.current_record:
+            return  # kept for when that record is shown again
+        self.current_reads = self.read_items(self.reads_by_record[id(record)])
+        self.refresh_features()
+        self.show_reads_dialog(results[0]["name"] if results else None)
+
+    @staticmethod
+    def read_items(results):
+        """Map/table items for the reads that aligned."""
+        items = []
+        for result in results:
+            alignment = result.get("alignment")
+            if alignment:
+                label = f"{result['name']} ({alignment['identity']:.1f}%)"
+                items.append(st.SeqFeature(alignment["location"], type="read", qualifiers={
+                    "label": [label], "read_name": [result["name"]]}))
+        return items
+
+    def show_reads_dialog(self, select_name=None):
+        if self.current_record is None:
+            return
+        results = self.reads_by_record.get(id(self.current_record), [])
+        if not results:
+            QMessageBox.information(self, "No reads", "No reads have been aligned to this "
+                                    "sequence yet. Use Tools \u2192 Align sequencing reads.")
+            return
+        if self.reads_dialog is None:
+            self.reads_dialog = ReadsDialog(self, self.current_record.id, results,
+                                            on_jump=self.jump_to, on_add=self.align_reads)
+            self.reads_dialog.destroyed.connect(self.forget_reads_dialog)
+        else:
+            self.reads_dialog.set_results(results)
+        if select_name:
+            self.reads_dialog.select_read(select_name)
+        self.reads_dialog.show()
+        self.reads_dialog.raise_()
+
+    def forget_reads_dialog(self):
+        self.reads_dialog = None
+
+    def jump_to(self, start, end):
+        """Select a region in the Sequence view (the map follows)."""
+        self.viewer.select_range(start, end)
+
+    def remove_read(self, name):
+        if self.current_record is None:
+            return
+        key = id(self.current_record)
+        self.reads_by_record[key] = [r for r in self.reads_by_record.get(key, []) if r["name"] != name]
+        self.current_reads = self.read_items(self.reads_by_record[key])
+        self.refresh_features()
+        if self.reads_dialog is not None:
+            if self.reads_by_record[key]:
+                self.reads_dialog.set_results(self.reads_by_record[key])
+            else:
+                self.reads_dialog.close()
+
+    def clear_reads(self):
+        if self.current_record is None:
+            return
+        self.reads_by_record.pop(id(self.current_record), None)
+        self.current_reads = []
+        self.refresh_features()
+        if self.reads_dialog is not None:
+            self.reads_dialog.close()
+
     # ================================================================ digest
     def open_digest(self):
         if not self.require_dna("The virtual digest"):
@@ -1226,7 +1354,7 @@ class MainWindow(QMainWindow):
             circular = False
         else:
             circular = record is None or st.is_circular(record)
-        self.map_stack.setCurrentWidget(self.circular_viewer if circular else self.linear_panel)
+        self.map_stack.setCurrentWidget(self.circular_panel if circular else self.linear_panel)
 
     def set_map_mode(self, mode):
         self.map_mode = mode

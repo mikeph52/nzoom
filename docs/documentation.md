@@ -1,8 +1,8 @@
 # N-Zoom User Manual
 
-**Version 0.10.1** · by mikeph52
+**Version 0.13.1** · by mikeph52
 
-N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. You can add and edit your own features, find open reading frames, restriction sites and primer binding sites, run virtual digests on a simulated gel, translate any region, and download sequences straight from NCBI. It has light and dark modes.
+N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It opens FASTA and GenBank files, and draws plasmid maps with annotated features. You can add and edit your own features, find open reading frames, restriction sites and primer binding sites, run virtual digests on a simulated gel, check clones against Sanger sequencing reads, translate any region, and download sequences straight from NCBI. It has light and dark modes.
 
 ---
 
@@ -22,15 +22,17 @@ N-Zoom is a desktop app for viewing and analysing DNA and protein sequences. It 
 12. [Translation, reverse complement and copying](#12-translation-reverse-complement-and-copying)
 13. [Finding open reading frames (ORFs)](#13-finding-open-reading-frames-orfs)
 14. [Adding, editing and deleting features](#14-adding-editing-and-deleting-features)
-15. [Finding primers](#15-finding-primers)
-16. [Virtual digest and gel](#16-virtual-digest-and-gel)
-17. [Light and dark mode](#17-light-and-dark-mode)
-18. [Saving and exporting](#18-saving-and-exporting)
-19. [Keyboard shortcuts](#19-keyboard-shortcuts)
-20. [Color reference](#20-color-reference)
-21. [File format notes](#21-file-format-notes)
-22. [Known limitations](#22-known-limitations)
-23. [Troubleshooting](#23-troubleshooting)
+15. [Finding a sequence](#15-finding-a-sequence)
+16. [Finding primers](#16-finding-primers)
+17. [Virtual digest and gel](#17-virtual-digest-and-gel)
+18. [Checking clones with sequencing reads](#18-checking-clones-with-sequencing-reads)
+19. [Light and dark mode](#19-light-and-dark-mode)
+20. [Saving and exporting](#20-saving-and-exporting)
+21. [Keyboard shortcuts](#21-keyboard-shortcuts)
+22. [Color reference](#22-color-reference)
+23. [File format notes](#23-file-format-notes)
+24. [Known limitations](#24-known-limitations)
+25. [Troubleshooting](#25-troubleshooting)
 
 ---
 
@@ -61,18 +63,22 @@ N-Zoom/
 │   ├── digest.py
 │   ├── maps.py
 │   ├── primers.py
+│   ├── reads.py
 │   ├── seqtools.py
 │   ├── theme.py
+│   ├── undo.py
 │   ├── viewers.py
 │   └── workers.py
 ├── docs/
 │   └── documentation.md
 ├── examples/
-│   └── pDEMO.gb
-└── tests/
+│   ├── pDEMO.gb
+│   └── pDEMO_*.ab1   (simulated sequencing reads)
+├── tests/
+└── tools/            (scripts that make the example reads)
 ```
 
-`examples/pDEMO.gb` is a 4,000 bp demo plasmid for trying every tool. It has annotated features, two genes that translate cleanly (GFP and AmpR), and a multiple cloning site whose ten enzymes each cut only once. The genes are made of random codons, so they have the right size and shape but aren't real proteins.
+`examples/pDEMO.gb` is a 4,000 bp demo plasmid for trying every tool. The three `pDEMO_*.ab1` files next to it are simulated Sanger reads of a pDEMO "clone" with one point mutation, for trying [read alignment](#18-checking-clones-with-sequencing-reads). It has annotated features, two genes that translate cleanly (GFP and AmpR), and a multiple cloning site whose ten enzymes each cut only once. The genes are made of random codons, so they have the right size and shape but aren't real proteins.
 
 ## 2. Starting N-Zoom
 
@@ -104,6 +110,7 @@ Always start the app through `main.py`. The files inside `core/` are parts of th
 │            │                                      │  Virtual digest  │
 │            │                                      │  Find ORFs       │
 │            │                                      │  Find primer     │
+│            │                                      │  Align reads     │
 │            │                                      │  Add feature     │
 ├────────────┴──────────────────────────────────────┴──────────────────┤
 │ Status bar                                                           │
@@ -183,7 +190,7 @@ The **Map** tab draws the current DNA record in one of two styles:
 
 ### Choosing the map style
 
-By default N-Zoom picks the style from the record's [topology](#21-file-format-notes): circular records get the circular map, and linear, FASTA and unknown records get the linear map. To override this, use **View → Map style**:
+By default N-Zoom picks the style from the record's [topology](#23-file-format-notes): circular records get the circular map, and linear, FASTA and unknown records get the linear map. To override this, use **View → Map style**:
 
 | Option | Shows |
 |---|---|
@@ -206,9 +213,38 @@ The choice is remembered for next time. Changing the map style doesn't change th
 | **ORFs** | Thin light-green arcs | Thin light-green bars |
 | **Restriction sites** | Red ticks and red labels | Red ticks across the bar, red labels above |
 | **Selected region** | Yellow band on the circle | Yellow band over the bar |
+| **[Find](#15-finding-a-sequence) matches** | Short purple ticks across the circle | Small purple blocks on the bar |
+| **[Sequencing reads](#18-checking-clones-with-sequencing-reads)** | Grey-blue arcs | Grey-blue bars |
 | **Name and length** | In the centre | Top left |
 
-The tick spacing (for example every 200, 500 or 1,000 bp) adapts to the sequence length. The linear map fits the whole sequence into the window's width; there's no zoom yet.
+The tick spacing (for example every 200, 500 or 1,000 bp) adapts to the visible length.
+
+### Zooming and moving around
+
+Both maps start with the whole sequence in view. To look closer:
+
+| To | Circular map | Linear map |
+|---|---|---|
+| **Zoom in or out** | Turn the **mouse wheel** over the map (the spot under the pointer stays put), or use the **−** and **+** buttons below the map | Same |
+| **Move around** | **Drag the background** of the map | Drag the background, drag the **scrollbar** below the map, hold **Shift** and turn the wheel, or swipe sideways on a touchpad |
+| **See everything again** | Click **Fit** | Click **Fit** |
+
+When zoomed in, the circle grows beyond the window and you see part of it, like a magnifying glass. The linear map's title shows which part is visible, for example `showing 141–1,140`, and features that run off its edge are cut there, without an arrowhead. Tick spacing adapts to the zoom level.
+
+Zoom in far enough, to about 7 pixels per base, and both maps show the **bases themselves**: the top strand outside the circle (above the linear bar) and the complementary strand inside (below), colored like the Sequence view. You can zoom until each base is 16 pixels wide. For very large sequences, the circular map stops zooming earlier; use the linear map to see their bases.
+
+Selecting a feature (in the table or on the map), selecting bases in the Sequence view, or jumping to a [Find](#15-finding-a-sequence) match moves the zoomed map to show it.
+
+### Exporting the map
+
+**File → Export map image…** (Ctrl+Shift+E) saves the map as you see it, in the current style and theme:
+
+| Format | Best for |
+|---|---|
+| **PNG** | Slides, documents and lab notebooks. Saved at twice the screen resolution, so it stays sharp. |
+| **SVG** | Posters and figures. A vector image that stays sharp at any size; labels stay editable text in Inkscape, Illustrator or Affinity Designer. |
+
+The image has the same size and proportions as the map on screen, so resize the window first to get the shape you want. A zoomed linear map is exported as zoomed. For printing, switch to the [light theme](#19-light-and-dark-mode) first.
 
 ### Overlapping features
 
@@ -242,7 +278,7 @@ The **source** feature, which spans the whole sequence in every GenBank file, is
 
 The **Sequence** tab shows the full sequence as wrapping text in a monospace font.
 
-- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#20-color-reference)). Longer sequences are shown in plain black so they load quickly.
+- **Colors:** sequences up to **50,000** characters are colored by base or amino acid (see [Color reference](#22-color-reference)). Longer sequences are shown in plain black so they load quickly.
 - **Feature highlighting:** when you select a feature, its region is highlighted in yellow and the view scrolls to it. Features with several parts, such as origin-crossing features or joined exons, highlight every part.
 - The view is **read-only**. You can select and copy text, but you can't edit it.
 
@@ -262,6 +298,8 @@ Positions are 1-based and include both ends, matching the feature table and GenB
 
 For DNA, the selected region is also shaded **yellow on the Map**, so you can see where it lies on the plasmid.
 
+Matches of a [Find](#15-finding-a-sequence) search are shown with an **orange** background.
+
 **Ctrl+C** copies the selected bases. **Right-click** the selection for more: copy the reverse complement, translate it, or turn it into a feature (see [Right-click menus](#11-right-click-menus)).
 
 ---
@@ -270,7 +308,7 @@ For DNA, the selected region is also shaded **yellow on the Map**, so you can se
 
 Below the viewer is a table of every annotated feature in the current record. The `source` feature is hidden, because it just covers the entire sequence.
 
-After you run the [ORF finder](#13-finding-open-reading-frames-orfs), ORFs are listed here too, in *grey italics* with type `ORF`, so you can tell them apart from real annotations.
+After you run the [ORF finder](#13-finding-open-reading-frames-orfs), ORFs are listed here too, in *grey italics* with type `ORF`, so you can tell them apart from real annotations. Aligned [sequencing reads](#18-checking-clones-with-sequencing-reads) are listed the same way, with type `read`.
 
 | Column | Meaning |
 |---|---|
@@ -309,7 +347,7 @@ The status bar shows the location in Biopython's internal notation, which counts
 | **Length** | Number of bases or residues |
 | **Topology** | `circular` or `linear` as recorded in a GenBank file; `unknown` for FASTA |
 | **GC %** | (G + C) ÷ total length × 100. DNA only. Ambiguous letters such as `N` count toward the total but not toward GC. |
-| **Features** | Number of annotated features, plus the number of ORFs found, if any. For example `10 (+ 2 ORFs)`. |
+| **Features** | Number of annotated features, plus the number of ORFs and aligned reads, if any. For example `10 (+ 3 reads)`. |
 | **Composition** | Count of the 12 most common letters, most frequent first |
 
 ---
@@ -478,7 +516,7 @@ Use **Tools → Clear ORFs**. ORFs are also cleared when you select a different 
 
 ## 14. Adding, editing and deleting features
 
-All changes are made to the records in memory. Use [Save](#18-saving-and-exporting) to write them to a file.
+All changes are made to the records in memory. Use [Save](#20-saving-and-exporting) to write them to a file.
 
 ### Adding a feature
 
@@ -514,13 +552,68 @@ If a feature's name came from `/gene` or `/product` rather than `/label`, editin
 
 Right-click it → **Delete feature**, select it and press **Delete**, or use **Edit → Delete selected feature**. N-Zoom asks you to confirm first.
 
-### Undo
+### Undo and redo
 
-There's no undo yet. To throw away all changes since your last save, open the file again and choose **Discard** when asked about unsaved changes.
+Every change to features can be undone: adding, editing and deleting features, adding primer sites, and turning ORFs into CDS features.
+
+- **Edit → Undo** (Ctrl+Z) reverses the last change. The menu item names it, for example `Undo Delete terminator "T7 terminator"`.
+- **Edit → Redo** (Ctrl+Shift+Z; Ctrl+Y on Windows) does it again.
+- You can undo as many steps as you like, back to when the file was opened. A deleted feature comes back in its original place.
+- If you undo back to the state you last saved, the `*` disappears from the window title: there's nothing left to save.
+- Undo history is cleared when you open another file.
+
+These can't be undone: fetching records from NCBI, finding ORFs or restriction sites (just run them again or clear them), and saving.
 
 ---
 
-## 15. Finding primers
+## 15. Finding a sequence
+
+Use **Edit → Find sequence…** (Ctrl+F). A search bar opens above the map. Type what you're looking for; matches update as you type.
+
+### What you can search for
+
+**DNA records:**
+- A plain sequence, for example `GGATCC`. Lowercase is fine.
+- **IUPAC codes** for degenerate positions. For example `GANTC` finds GAATC, GACTC, GAGTC and GATTC.
+
+| Code | Matches | Code | Matches |
+|---|---|---|---|
+| `R` | A or G | `K` | G or T |
+| `Y` | C or T | `M` | A or C |
+| `S` | C or G | `B` | not A |
+| `W` | A or T | `D` | not C |
+| `N` | any base | `H` | not G |
+| | | `V` | not T |
+
+**Protein records:** a stretch of amino acids, where `X` matches any residue.
+
+### Both strands
+
+With **Both strands** checked (the default), N-Zoom also finds the motif on the reverse strand: places where its reverse complement appears on the top strand. Reverse-strand matches show `reverse strand` next to the count. A palindromic motif such as `GAATTC` reads the same on both strands, so each site is found once.
+
+Uncheck **Both strands** to search the top strand only.
+
+On **circular** records, matches can run across the origin. Overlapping matches are all found: `AA` in `AAAA` gives three matches.
+
+### Moving between matches
+
+| To | Do this |
+|---|---|
+| **Next match** | **Enter** in the search box, the **▼** button, or **Edit → Find next** (F3 on most systems) |
+| **Previous match** | **Shift+Enter**, the **▲** button, or **Edit → Find previous** (Shift+F3) |
+| **Close the search** | **Esc**, or the **✕** button |
+
+The current match is **selected** in the Sequence view, so the status bar shows its position and GC%, and you can right-click it to copy, translate or turn it into a feature. The count shows where you are, for example `2 of 8`.
+
+All matches are highlighted in **orange** in the Sequence view and marked in **purple** on the map. If text is selected when you press Ctrl+F (up to 100 bases), the search starts with it.
+
+### Limits
+
+Counting stops at 5,000 matches (shown as `5,000+`). Highlighting in the Sequence view stops at 2,000 matches to keep the app responsive; the map marks up to 2,000 too.
+
+---
+
+## 16. Finding primers
 
 Use **Tools → Find primer…** (Ctrl+P) or the **Find primer** button (DNA only).
 
@@ -558,7 +651,7 @@ The search looks for exact 3′ matches only. Primers with a mismatch near the 3
 
 ---
 
-## 16. Virtual digest and gel
+## 17. Virtual digest and gel
 
 Use **Tools → Virtual digest…** (Ctrl+D) or the **Virtual digest** button (DNA only). N-Zoom first finds every enzyme that cuts the sequence, which runs in the background, then opens the digest window. If you've just run **Find restriction sites** on the same record, it opens straight away.
 
@@ -609,7 +702,76 @@ For the selected lane, the table lists each fragment:
 
 ---
 
-## 17. Light and dark mode
+## 18. Checking clones with sequencing reads
+
+After cloning, you usually send the plasmid for **Sanger sequencing** to check it. N-Zoom aligns the returned reads against your plasmid, lists every difference, and shows the chromatogram at each one, so you can tell real mutations from sequencing errors.
+
+### Aligning reads
+
+1. Open the plasmid you expect, for example your designed construct.
+2. Use **Tools → Align sequencing reads…** (Ctrl+L) or the **Align reads** button.
+3. Choose one or more read files. You can select many at once.
+
+| File type | Extensions | What you get |
+|---|---|---|
+| **ABI chromatograms** (straight from the sequencing service) | `.ab1`, `.abi` | Bases, quality values and the chromatogram |
+| **FASTQ** | `.fastq`, `.fq` | Bases and quality values |
+| **FASTA** or plain text | `.fasta`, `.fa`, `.seq`, `.txt` | Bases only |
+
+Alignment runs in the background. When it's done, the **Sequencing reads** window opens and the reads appear on the map and in the feature table.
+
+To try it, open `examples/pDEMO.gb` and align the three `pDEMO_*.ab1` files from the same folder.
+
+### What N-Zoom does with each read
+
+- **Trims** the poor-quality ends. Every read starts and ends with unreliable bases; N-Zoom keeps the best stretch, where bases are better than about 95% likely to be right (the "modified Mott" method used by phred). Reads without quality values are used whole.
+- **Aligns** the read to the plasmid in **both orientations**, so reads from forward and reverse primers both work. On circular plasmids, reads can cross the origin. On very long sequences (over 50 kb), N-Zoom first locates the read by short exact matches, then aligns it there.
+- **Lists every difference**: mismatches (a different base), insertions (extra bases in the read) and deletions (bases missing from the read).
+
+### The Sequencing reads window
+
+**The read table** (top) has one row per read:
+
+| Column | Meaning |
+|---|---|
+| **Read** | File name |
+| **Strand** | → the read runs along the top strand, ← along the bottom strand |
+| **Covers** | The part of the plasmid the read covers |
+| **Aligned** | Length of the alignment |
+| **Identity** | % of aligned positions that match |
+| **Result** | **matches** (no high-quality differences), **N differences**, or **no match** |
+
+**The difference table** (lower left) lists the differences in the selected read:
+
+| Column | Meaning |
+|---|---|
+| **Position** | Plasmid position. For insertions, `1,200½` means "between 1,200 and 1,201". |
+| **Type** | mismatch, insertion or deletion |
+| **Reference / Read** | The plasmid's bases and the read's bases at that spot, both on the top strand |
+| **Quality** | The read's quality value there (phred score: 20 = 99% sure, 30 = 99.9%, 40 = 99.99%) |
+| **Note** | **low quality** (below 20) means it's most likely a sequencing error. **check** means a confident difference: look at the chromatogram. |
+
+**Click a difference** to jump to it: the chromatogram scrolls to it and highlights it, and the position is selected in the main window.
+
+**The Chromatogram tab** shows the raw signal: four colored traces (A green, C blue, G black or light grey in dark mode, T red), the base calls on top with grey quality bars, and the read position every 10 bases. Grey shading marks the trimmed ends. Reverse reads are shown as sequenced, so their bases are the reverse complement of the plasmid. Only `.ab1` files have chromatograms.
+
+**The Alignment tab** shows the alignment as text, 60 bases per line, with `|` between matching bases.
+
+### Reading the results
+
+- A **single clean peak** under a "check" difference, confirmed by a second read from the other direction, is very likely a **real change** in your clone.
+- **Overlapping peaks** at one position can mean a mixed population: pick a single colony and sequence again.
+- Differences only near the ends of reads, or marked **low quality**, are usually sequencing errors.
+
+### Reads on the map
+
+Each aligned read appears on the map as a grey-blue arrow named after the file, with its identity, for example `pDEMO_GFP_fwd (99.7%)`. Reads appear in the feature table in grey italics. **Right-click** a read (or double-click its row) to open its alignment and chromatogram, select its region, or remove it.
+
+Reads belong to the record they were aligned to. They stay while N-Zoom is open, even if you switch between records, but they **aren't saved** in the file. **Tools → Clear reads** removes them; **Tools → Show aligned reads** reopens the window.
+
+---
+
+## 19. Light and dark mode
 
 Choose **View → Theme**:
 
@@ -627,7 +789,7 @@ N-Zoom uses the same widget style (Qt's "Fusion") on every platform, because som
 
 ---
 
-## 18. Saving and exporting
+## 20. Saving and exporting
 
 | Command | What it does |
 |---|---|
@@ -656,14 +818,21 @@ If you save FASTA-loaded records as GenBank, N-Zoom also fills in the molecule t
 
 ---
 
-## 19. Keyboard shortcuts
+## 21. Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
 | **Ctrl+O** | Open a file |
 | **Ctrl+S** | Save |
 | **Ctrl+Shift+S** | Save As |
+| **Ctrl+Z** | Undo the last feature change |
+| **Ctrl+Shift+Z** (Ctrl+Y on Windows) | Redo |
+| **Ctrl+F** | Find sequence |
+| **F3** / **Shift+F3** | Next / previous match (Cmd+G / Cmd+Shift+G on macOS) |
+| **Esc** | Close the Find bar |
+| **Ctrl+Shift+E** | Export map image |
 | **Ctrl+E** | Add feature |
+| **Ctrl+L** | Align sequencing reads |
 | **Ctrl+D** | Virtual digest |
 | **Ctrl+P** | Find primer |
 | **Delete** | Delete the selected feature (when the feature table has focus) |
@@ -671,12 +840,15 @@ If you save FASTA-loaded records as GenBank, N-Zoom also fills in the molecule t
 | **Ctrl+A** | Select the whole sequence (in the Sequence view) |
 | **Ctrl+C** | Copy selected text in the Sequence view |
 | **Shift + arrow keys** | Extend the selection in the Sequence view |
+| **Mouse wheel** over a map | Zoom in or out |
+| **Shift + mouse wheel** over the linear map | Scroll sideways |
+| **Drag** the map background (when zoomed) | Move around |
 
 On macOS, use **Cmd** instead of Ctrl.
 
 ---
 
-## 20. Color reference
+## 22. Color reference
 
 The colors below are the same in light and dark mode; dark mode uses lighter shades so they stay readable.
 
@@ -720,13 +892,14 @@ The colors below are the same in light and dark mode; dark mode uses lighter sha
 | `regulatory` | Deep orange |
 | `misc_feature` | Grey |
 | ORFs (from the ORF finder) | Light green, thinner arcs |
+| Sequencing reads | Grey-blue |
 | any other type | Blue-grey |
 
-Restriction sites are always dark red. The selected region is shaded yellow.
+Restriction sites are always dark red. The selected region is shaded yellow. [Find](#15-finding-a-sequence) matches are purple on the map and orange in the Sequence view.
 
 ---
 
-## 21. File format notes
+## 23. File format notes
 
 ### How features look in a GenBank file
 
@@ -756,14 +929,15 @@ Topology is read from the `LOCUS` line of a GenBank file, for example `LOCUS pUC
 
 ---
 
-## 22. Known limitations
+## 24. Known limitations
 
-These apply to version 0.8.0:
+These apply to version 0.10.0:
 
 - **The sequence itself can't be edited.** Features can be added, edited and deleted, but bases can't be inserted, removed or changed.
-- **No undo** for feature changes. Discarding unsaved changes is the only way back.
 - **Background tasks can't be cancelled.** If you close N-Zoom while a download or search is running, it waits for the task to finish before closing.
-- **No zoom on the maps.** The whole sequence always fits the window, so dense regions of large sequences are hard to read on the map; use the Sequence view or the feature table.
+- **Aligned reads aren't saved** in the file; align them again after reopening.
+- **No contig assembly.** Each read is aligned on its own; overlapping reads aren't merged into one consensus sequence.
+- **Reads are aligned to one record.** Each read is placed at its single best match; a read matching two places equally well shows only one.
 - **Primer search finds exact 3′ matches only.** There's no primer design, and no check for hairpins or primer dimers.
 - **The gel is an approximation.** Band positions use a simple log model, and uncut plasmids are not drawn the way they really run.
 - **The ORF finder only uses ATG** as a start codon, and the standard genetic code.
@@ -772,7 +946,7 @@ These apply to version 0.8.0:
 
 ---
 
-## 23. Troubleshooting
+## 25. Troubleshooting
 
 | Problem | Solution |
 |---|---|
@@ -789,6 +963,11 @@ These apply to version 0.8.0:
 | A translation has many `*` in the middle | The coordinates, strand or `/codon_start` of the feature are probably wrong |
 | Sequence appears in black instead of colors | It's longer than 50,000 characters. This is intentional, to keep the app fast. |
 | A plasmid is shown as a straight line | The record isn't marked circular (for example, it came from a FASTA file), or **View → Map style** is set to Linear |
+| Find says "Not a DNA letter or IUPAC code" | The search contains a character that isn't A, C, G, T or an IUPAC code (see [Finding a sequence](#15-finding-a-sequence)). For protein records, Find uses amino-acid letters instead. |
+| A read shows "no match" | It doesn't match the open sequence: check you opened the right plasmid. Very short or very poor reads (under 30 usable bases after trimming) also give no match. |
+| A read shows "Could not read file" | The file is damaged or isn't really a chromatogram. Ask the sequencing service for the `.ab1` again, or use its FASTA/FASTQ version. |
+| Undo is greyed out | There's nothing to undo since the file was opened. Fetching from NCBI and searches can't be undone. |
+| An exported map is cut off or squashed | The image matches the map's size on screen. Resize the window or the panels, then export again. |
 | A primer you expect isn't found | Check it's written 5′ → 3′, and that its 3′ end matches the template exactly. Lower **Must match** to allow shorter annealing. |
 | The enzyme you want isn't in the digest list | It doesn't cut this sequence, or the drop-down hides enzymes that cut more often. Choose **All enzymes that cut**. |
 | Colors look wrong after switching theme | Choose the theme again in **View → Theme**; if that doesn't help, restart N-Zoom |

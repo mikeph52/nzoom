@@ -195,12 +195,12 @@ def linear_copy_of_demo():
 
 def test_map_style_follows_topology(window, monkeypatch, tmp_path):
     open_demo(window, monkeypatch, tmp_path)
-    assert window.map_stack.currentWidget() is window.circular_viewer
+    assert window.map_stack.currentWidget() is window.circular_panel
     window.show_records(window.records + [linear_copy_of_demo()], select=1)
     assert window.map_stack.currentWidget() is window.linear_panel
 
     window.set_map_mode("circular")  # the user can override it
-    assert window.map_stack.currentWidget() is window.circular_viewer
+    assert window.map_stack.currentWidget() is window.circular_panel
     window.set_map_mode("auto")
     assert window.map_stack.currentWidget() is window.linear_panel
 
@@ -491,3 +491,110 @@ def test_opening_a_file_clears_undo_history(window, monkeypatch, tmp_path):
     window.add_feature()
     open_demo(window, monkeypatch, tmp_path / "again" if False else tmp_path)
     assert window.undo_stack.count() == 0
+
+
+# ------------------------------------------------------------------ sequencing reads
+DEMO_READS = [DEMO.parent / f"pDEMO_{n}.ab1" for n in ("GFP_fwd", "GFP_rev", "ori_fwd")]
+
+
+def align_demo_reads(window, qapp, monkeypatch, paths=DEMO_READS):
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(p) for p in paths], "")))
+    window.align_reads()
+    wait_for_tasks(window, qapp)
+
+
+def test_align_reads_shows_reads(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    features = len(window.current_features)
+    align_demo_reads(window, qapp, monkeypatch)
+
+    assert len(window.current_reads) == 3
+    assert window.feature_table.rowCount() == features + 3
+    assert "(+ 3 reads)" in window.features_value.text()
+    dialog = window.reads_dialog
+    assert dialog is not None and dialog.isVisible()
+    assert [r["name"] for r in dialog.results] == ["pDEMO_GFP_fwd", "pDEMO_GFP_rev", "pDEMO_ori_fwd"]
+
+    # clicking the high-quality difference selects it in the main window and the trace
+    differences = dialog.results[0]["alignment"]["differences"]
+    row = next(i for i, d in enumerate(differences) if not d["low_quality"])
+    dialog.diff_table.selectRow(row)
+    assert window.viewer.selected_range() == (999, 1000)
+    assert dialog.trace.marked == differences[row]["read_index"]
+    dialog.trace.grab()  # draws the chromatogram without errors
+
+
+def test_read_items_are_not_editable(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    align_demo_reads(window, qapp, monkeypatch, DEMO_READS[:1])
+    index = len(window.items) - 1
+    assert window.is_read(index) and not window.is_orf(index)
+    texts = [a.text() for a in window.build_item_menu(index).actions() if a.text()]
+    assert "Show alignment and chromatogram" in texts and "Delete feature" not in texts
+    window.delete_item(index)  # does nothing for reads
+    assert len(window.current_reads) == 1
+    assert window.undo_stack.count() == 0
+
+
+def test_reads_are_kept_per_record(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    window.show_records(window.records + [linear_copy_of_demo()], select=0)
+    align_demo_reads(window, qapp, monkeypatch, DEMO_READS[:2])
+    window.sequence_list.setCurrentRow(1)
+    assert window.current_reads == []
+    window.sequence_list.setCurrentRow(0)
+    assert len(window.current_reads) == 2
+
+
+def test_remove_and_clear_reads(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    align_demo_reads(window, qapp, monkeypatch)
+    window.remove_read("pDEMO_GFP_rev")
+    assert [i.qualifiers["read_name"][0] for i in window.current_reads] == ["pDEMO_GFP_fwd", "pDEMO_ori_fwd"]
+    window.clear_reads()
+    assert window.current_reads == [] and window.reads_dialog is None or not window.reads_dialog.isVisible()
+
+
+def test_opening_a_file_forgets_reads(window, qapp, monkeypatch, tmp_path):
+    open_demo(window, monkeypatch, tmp_path)
+    align_demo_reads(window, qapp, monkeypatch, DEMO_READS[:1])
+    open_demo(window, monkeypatch, tmp_path)
+    assert window.current_reads == [] and window.reads_by_record == {}
+
+
+# ------------------------------------------------------------------ circular zoom
+def test_circular_zoom_and_pan(window, monkeypatch, tmp_path):
+    from PySide6.QtCore import QPointF
+    open_demo(window, monkeypatch, tmp_path)
+    view = window.circular_viewer
+    view.grab()
+    anchor = QPointF(view.width() * 0.7, view.height() * 0.3)
+    view._sync_center()
+    before = view._point(1000, view._radius())
+    view.zoom_by(3, anchor)
+    view._sync_center()
+    assert view.zoom == 3
+
+    # a point on the circle moves away from the anchor by the zoom factor
+    after = view._point(1000, view._radius())
+    assert abs((after - anchor).x() - 3 * (before - anchor).x()) < 1
+    assert abs((after - anchor).y() - 3 * (before - anchor).y()) < 1
+
+    view.set_zoom(1000)  # capped
+    assert view.zoom == view.max_zoom() and view.px_per_bp() <= 16.01
+    view.grab()  # bases along the circle draw without errors
+    view.fit()
+    assert view.zoom == 1 and view.pan == QPointF(0, 0)
+
+
+def test_circular_map_pans_to_selection(window, monkeypatch, tmp_path):
+    from PySide6.QtCore import QRectF
+    open_demo(window, monkeypatch, tmp_path)
+    view = window.circular_viewer
+    view.grab()
+    view.set_zoom(20)
+    window.viewer.select_range(2400, 2410)  # AmpR region, far from the middle
+    view._sync_center()
+    point = view._point(2405, view._radius())
+    assert QRectF(view.rect()).contains(point)

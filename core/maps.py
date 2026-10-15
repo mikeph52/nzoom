@@ -49,6 +49,7 @@ def small_font(size=8, bold=False):
 class MapView(QWidget):
     featureClicked = Signal(int)              # index into the features list
     featureContextMenu = Signal(int, QPoint)  # index, global position for the menu
+    viewChanged = Signal()                    # zoom or scroll position changed
 
     def __init__(self):
         super().__init__()
@@ -185,12 +186,141 @@ RING_GAP = 11        # pixels between rings
 ARC_WIDTH = 8        # thickness of a feature arc
 
 
+MAX_CIRCLE_RADIUS = 1_000_000  # px; very large arcs draw badly, so zoom stops here
+
+
 class CircularDNAViewer(MapView):
+    """Circular map. Mouse wheel zooms around the pointer; dragging the
+    background moves the circle."""
+
     def __init__(self):
         super().__init__()
         self._hit_regions = []
         self._cx = self._cy = 0.0
+        self.zoom = 1.0
+        self.pan = QPointF(0, 0)  # circle centre offset from the widget centre (px)
+        self._drag = None
         self.setMinimumSize(450, 450)
+
+    # ---------------------------------------------------------- view
+    def set_record(self, length, title, features=None, sequence=""):
+        self.zoom, self.pan = 1.0, QPointF(0, 0)
+        super().set_record(length, title, features, sequence)
+        self.viewChanged.emit()
+
+    def _base_radius(self):
+        return min(self.width(), self.height()) * 0.27
+
+    def _radius(self):
+        return self._base_radius() * self.zoom
+
+    def _center(self):
+        return QPointF(self.width() / 2 + self.pan.x(), self.height() / 2 + self.pan.y())
+
+    def px_per_bp(self):
+        return 2 * math.pi * self._radius() / self.length if self.length else 0
+
+    def max_zoom(self):
+        if not self.length:
+            return 1.0
+        by_bases = MAX_PX_PER_BP * self.length / (2 * math.pi * self._base_radius())
+        return max(1.0, min(by_bases, MAX_CIRCLE_RADIUS / self._base_radius()))
+
+    def set_zoom(self, zoom, anchor=None):
+        """Zoom, keeping the point under `anchor` (default: the middle) in place."""
+        if not self.length:
+            return
+        anchor = anchor or QPointF(self.width() / 2, self.height() / 2)
+        new_zoom = min(max(zoom, 1.0), self.max_zoom())
+        if new_zoom == 1.0:
+            self.pan = QPointF(0, 0)
+        else:
+            center = self._center()
+            factor = new_zoom / self.zoom
+            new_center = anchor + (center - anchor) * factor
+            self.pan = new_center - QPointF(self.width() / 2, self.height() / 2)
+        self.zoom = new_zoom
+        self.update()
+        self.viewChanged.emit()
+
+    def zoom_by(self, factor, anchor=None):
+        self.set_zoom(self.zoom * factor, anchor)
+
+    def fit(self):
+        self.zoom, self.pan = 1.0, QPointF(0, 0)
+        self.update()
+        self.viewChanged.emit()
+
+    def ensure_visible(self, start, end):
+        """Move (not zoom) the circle so the middle of start..end is on screen."""
+        if not self.length or self.zoom <= 1.0:
+            return
+        point = self._point((start + end) / 2, self._radius())
+        if QRectF(self.rect()).adjusted(60, 60, -60, -60).contains(point):
+            return
+        self.pan += QPointF(self.width() / 2, self.height() / 2) - point
+        self.update()
+        self.viewChanged.emit()
+
+    def set_selected(self, index):
+        super().set_selected(index)
+        if 0 <= index < len(self.features):
+            self._sync_center()
+            start, end = max(feature_parts(self.features[index]), key=lambda p: p[1] - p[0])
+            self.ensure_visible(start, end)
+
+    def set_highlight(self, start=None, end=None):
+        super().set_highlight(start, end)
+        if self.highlight:
+            self._sync_center()
+            self.ensure_visible(*self.highlight)
+
+    def _sync_center(self):
+        center = self._center()
+        self._cx, self._cy = center.x(), center.y()
+
+    # ---------------------------------------------------------- mouse
+    def wheelEvent(self, event):
+        dy = event.angleDelta().y()
+        if self.length and dy:
+            self.zoom_by(1.25 ** (dy / 120), event.position())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton and self.zoom > 1.0
+                and self.feature_at(event.position()) < 0):
+            self._drag = (event.position(), QPointF(self.pan))
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag:
+            start, pan = self._drag
+            self.pan = pan + (event.position() - start)
+            self.update()
+            self.viewChanged.emit()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag:
+            self._drag = None
+            self.unsetCursor()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _visible_positions(self):
+        """(first, last) base positions near the visible part of the circle, or
+        None when the whole circle fits. May run past 0 or the length (wrap)."""
+        radius = self._radius()
+        if 2 * math.pi * radius <= 2 * (self.width() + self.height()):
+            return None
+        wx, wy = self.width() / 2, self.height() / 2
+        theta = math.atan2(wy - self._cy, wx - self._cx)
+        middle = ((theta + math.pi / 2) % (2 * math.pi)) / (2 * math.pi) * self.length
+        half = math.hypot(self.width(), self.height()) / 2 / self.px_per_bp() + 2
+        return middle - half, middle + half
 
     def _angle(self, position):
         """Radians; 0 bp is at 12 o'clock, positions run clockwise."""
@@ -206,12 +336,13 @@ class CircularDNAViewer(MapView):
             return
         colors = theme.current()
 
-        self._cx = self.width() / 2
-        self._cy = self.height() / 2
-        radius = min(self.width(), self.height()) * 0.27
+        self._sync_center()
+        radius = self._radius()
         fwd_lanes = self._lane_count(True)
         rev_lanes = self._lane_count(False)
-        inner_r = radius - 12 - rev_lanes * RING_GAP
+        letters = self.px_per_bp() >= LETTERS_PX_PER_BP and bool(self.sequence)
+        first_ring = 24 if letters else 12  # rings move out to make room for the bases
+        inner_r = radius - first_ring - rev_lanes * RING_GAP
 
         # backbone
         painter.setPen(QPen(QColor(colors.backbone), 3))
@@ -229,6 +360,8 @@ class CircularDNAViewer(MapView):
             painter.drawArc(rect, round((90 - start / self.length * 360) * 16), round(-span * 16))
 
         self._draw_ticks(painter, radius, inner_r - 14)
+        if letters:
+            self._draw_bases(painter, radius)
 
         # Find matches: short ticks across the backbone
         if self.marks:
@@ -243,7 +376,7 @@ class CircularDNAViewer(MapView):
         for i, feature in enumerate(self.features):
             if i not in self._lanes:
                 continue
-            offset = 12 + self._lanes[i] * RING_GAP
+            offset = first_ring + self._lanes[i] * RING_GAP
             r = radius + offset if self._is_forward(i) else radius - offset
             self._draw_feature(painter, i, feature, r)
             self._hit_regions.append((i, r, feature_parts(feature)))
@@ -259,16 +392,23 @@ class CircularDNAViewer(MapView):
                 labels.append((1, pos, name, QColor(colors.site), radius + 6))
 
         if len(labels) <= MAX_LABELS:
-            self._draw_labels(painter, labels, radius + 12 + fwd_lanes * RING_GAP + 14)
+            self._draw_labels(painter, labels, radius + first_ring + fwd_lanes * RING_GAP + 14)
 
         self._draw_center_text(painter, inner_r)
         painter.end()
 
     def _draw_ticks(self, painter, radius, label_r):
         colors = theme.current()
-        interval = nice_interval(self.length)
+        interval = nice_interval(self.length / self.zoom)
         painter.setFont(small_font())
-        for pos in range(0, self.length, interval):
+        visible = self._visible_positions()
+        if visible is None:
+            positions = range(0, self.length, interval)
+        else:
+            first, last = visible
+            positions = sorted({(k * interval) % self.length for k in
+                                range(math.floor(first / interval), math.ceil(last / interval) + 1)})
+        for pos in positions:
             painter.setPen(QPen(QColor(colors.tick), 1))
             painter.drawLine(self._point(pos, radius - 4), self._point(pos, radius + 4))
             if self.length - pos < interval / 2 and pos != 0:
@@ -277,6 +417,30 @@ class CircularDNAViewer(MapView):
             painter.setPen(QColor(colors.muted))
             painter.drawText(QRectF(p.x() - 30, p.y() - 7, 60, 14),
                              Qt.AlignmentFlag.AlignCenter, f"{pos:,}")
+
+    def _draw_bases(self, painter, radius):
+        """Top strand just outside the circle, the other strand just inside."""
+        colors = theme.current()
+        font = QFont("Monospace")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(8 if self.px_per_bp() < 11 else 10)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        w, h = metrics.horizontalAdvance("W") + 2, metrics.height()
+        complement = str.maketrans("ACGTURYKMBDHVN", "TGCAAYRMKVHDBN")
+        visible = self._visible_positions() or (0, self.length)
+        area = QRectF(self.rect()).adjusted(-20, -20, 20, 20)
+        first, last = int(visible[0]), int(visible[1]) + 1
+        for raw in range(first, min(last, first + 6000)):
+            pos = raw % self.length
+            base = self.sequence[pos]
+            for letter, r in ((base, radius + 8), (base.translate(complement), radius - 8)):
+                point = self._point(pos + 0.5, r)
+                if not area.contains(point):
+                    continue
+                painter.setPen(QColor(colors.dna_colors.get(letter, colors.other_letter)))
+                painter.drawText(QRectF(point.x() - w / 2, point.y() - h / 2, w, h),
+                                 Qt.AlignmentFlag.AlignCenter, letter)
 
     def _draw_feature(self, painter, index, feature, r):
         color = QColor(feature_color(feature))
@@ -382,7 +546,6 @@ LETTERS_PX_PER_BP = 7  # show the bases once each one gets this many pixels
 class LinearDNAViewer(MapView):
     """Horizontal map. Mouse wheel zooms around the pointer; Shift+wheel,
     a sideways wheel, or dragging the background scrolls."""
-    viewChanged = Signal()  # zoom or scroll position changed
 
     def __init__(self):
         super().__init__()
@@ -742,10 +905,10 @@ class LinearDNAViewer(MapView):
         return -1
 
 
-class LinearMapPanel(QWidget):
-    """The linear map with a scrollbar and zoom buttons underneath."""
+class MapPanel(QWidget):
+    """A map with zoom buttons underneath (and, for the linear map, a scrollbar)."""
 
-    def __init__(self, viewer):
+    def __init__(self, viewer, scrollbar=True):
         super().__init__()
         self.viewer = viewer
         layout = QVBoxLayout(self)
@@ -755,9 +918,13 @@ class LinearMapPanel(QWidget):
 
         row = QHBoxLayout()
         row.setContentsMargins(4, 0, 4, 2)
-        self.scrollbar = QScrollBar(Qt.Orientation.Horizontal)
-        self.scrollbar.valueChanged.connect(viewer.set_view_start)
-        row.addWidget(self.scrollbar, 1)
+        self.scrollbar = None
+        if scrollbar:
+            self.scrollbar = QScrollBar(Qt.Orientation.Horizontal)
+            self.scrollbar.valueChanged.connect(viewer.set_view_start)
+            row.addWidget(self.scrollbar, 1)
+        else:
+            row.addStretch(1)
         for text, tip, slot in (("−", "Zoom out", lambda: viewer.zoom_by(1 / 2)),
                                 ("+", "Zoom in", lambda: viewer.zoom_by(2)),
                                 ("Fit", "Show the whole sequence", viewer.fit)):
@@ -772,6 +939,8 @@ class LinearMapPanel(QWidget):
 
     def sync_scrollbar(self):
         viewer = self.viewer
+        if self.scrollbar is None:
+            return
         span = int(round(viewer.visible_span()))
         self.scrollbar.blockSignals(True)
         self.scrollbar.setRange(0, max(0, viewer.length - span))
@@ -780,6 +949,10 @@ class LinearMapPanel(QWidget):
         self.scrollbar.setValue(int(round(viewer.view_start)))
         self.scrollbar.setEnabled(viewer.zoom > 1.0)
         self.scrollbar.blockSignals(False)
+
+
+def LinearMapPanel(viewer):
+    return MapPanel(viewer, scrollbar=True)
 
 
 # =================================================================== group
