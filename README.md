@@ -4,6 +4,8 @@
 
 N-Zoom is a lightweight, free alternative to commercial plasmid tools. Open a FASTA or GenBank file, or pull a sequence straight from NCBI. You can then explore it on an annotated circular map.
 
+![Tests](https://github.com/mikeph52/nzoom/actions/workflows/tests.yml/badge.svg)
+
 > [!IMPORTANT]
 > Early alpha (v0.10.1). A first stable release is planned for 2027.
 
